@@ -3,13 +3,16 @@
 //! Encode phase streams results directly into the output RPA via Mutex,
 //! so memory usage stays bounded (~1 AVIF buffer per worker thread).
 
-use std::fs::File;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::{self, File};
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::os::raw::c_char;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::ffi::CString;
+use std::time::Instant;
 
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
@@ -89,6 +92,24 @@ fn get_avif_name(name: &str) -> String {
     }
 }
 
+// --- AVIF cache (persists across cancel/resume) ---
+
+fn cache_key(name: &str, quality: i32, speed: i32) -> String {
+    let mut h = DefaultHasher::new();
+    name.hash(&mut h);
+    quality.hash(&mut h);
+    speed.hash(&mut h);
+    format!("{:016x}.avif", h.finish())
+}
+
+fn read_cache(cache_dir: &Path, name: &str, quality: i32, speed: i32) -> Option<Vec<u8>> {
+    fs::read(cache_dir.join(cache_key(name, quality, speed))).ok()
+}
+
+fn write_cache(cache_dir: &Path, name: &str, quality: i32, speed: i32, data: &[u8]) {
+    let _ = fs::write(cache_dir.join(cache_key(name, quality, speed)), data);
+}
+
 // --- Image decoding ---
 
 fn decode_to_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
@@ -144,6 +165,19 @@ pub struct BuildStats {
     pub original_bytes: u64,
     pub compressed_bytes: u64,
     pub encode_errors: u32,
+    pub cache_hits: u32,
+    pub cancelled: bool,
+    pub timing: BuildTiming,
+}
+
+#[derive(Default)]
+pub struct BuildTiming {
+    pub index_s: f64,
+    pub passthrough_s: f64,
+    pub cache_s: f64,
+    pub encode_s: f64,
+    pub finalize_s: f64,
+    pub total_s: f64,
 }
 
 // PLACEHOLDER_BUILD_MAIN
@@ -160,17 +194,22 @@ pub fn build(
     workers: usize,
     exclude: &[String],
     progress: &dyn ProgressReport,
+    cancel: &AtomicBool,
+    cache_dir: Option<&Path>,
 ) -> Result<BuildStats, String> {
     // 1. Build skip prefixes: defaults + user excludes
+    let t_total = Instant::now();
     let mut skip_prefixes: Vec<String> = DEFAULT_SKIP_PREFIXES.iter().map(|s| s.to_string()).collect();
     skip_prefixes.extend(exclude.iter().cloned());
 
     // 2. Read source index
+    let t0 = Instant::now();
     let mut reader = RpaReader::open(input_path)
         .map_err(|e| format!("open RPA: {e}"))?;
     let index = reader.read_index()
         .map_err(|e| format!("read index: {e}"))?;
     let src_key = reader.key();
+    let dt_index = t0.elapsed().as_secs_f64();
 
     // 3. Classify entries
     let mut to_encode: Vec<&RpaEntry> = Vec::new();
@@ -186,16 +225,29 @@ pub fn build(
     let n_encode = to_encode.len() as u32;
     let n_pass = to_passthrough.len() as u32;
 
+    // Sort passthrough by offset for sequential I/O on source RPA
+    to_passthrough.sort_by_key(|e| e.offset);
+
     // 4. Create output RPA and write passthrough entries first
     let mut writer = RpaWriter::create(output_path, src_key)
         .map_err(|e| format!("create output RPA: {e}"))?;
 
     progress.phase_start(n_pass, &format!("Copying {} passthrough entries", n_pass));
     let src_file = reader.file();
+    let mut copy_buf = vec![0u8; 1024 * 1024]; // 1MB reusable buffer
+    let t0 = Instant::now();
     for (i, entry) in to_passthrough.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(BuildStats {
+                total_entries: n_encode + n_pass, encoded: 0,
+                passthrough: i as u32, original_bytes: 0,
+                compressed_bytes: 0, encode_errors: 0, cache_hits: 0, cancelled: true,
+                timing: BuildTiming::default(),
+            });
+        }
         writer.add_file_from(
             &entry.name, src_file,
-            entry.offset, entry.length, &entry.prefix,
+            entry.offset, entry.length, &entry.prefix, &mut copy_buf,
         ).map_err(|e| format!("copy '{}': {e}", entry.name))?;
 
         if (i + 1) % 500 == 0 || i + 1 == to_passthrough.len() {
@@ -203,91 +255,179 @@ pub fn build(
                 &format!("Copied {}/{}", i + 1, n_pass), 0, 0);
         }
     }
-    progress.phase_end(n_pass, "Passthrough done", 0, 0);
+    let dt_pass = t0.elapsed().as_secs_f64();
+    let pass_mb = to_passthrough.iter().map(|e| e.length + e.prefix.len() as u64).sum::<u64>() as f64 / 1_048_576.0;
+    progress.phase_end(n_pass, &format!("Passthrough done ({:.1}s, {:.0} MB, {:.0} MB/s)",
+        dt_pass, pass_mb, pass_mb / dt_pass.max(0.001)), 0, 0);
 
-    // 5. Parallel encode → write immediately via Mutex<RpaWriter>
-    progress.phase_start(n_encode,
-        &format!("Encoding {} images (quality={}, speed={}, workers={})",
-                 n_encode, quality, speed, workers));
-
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .map_err(|e| format!("rayon pool: {e}"))?;
-
-    let writer_mu = Mutex::new(writer);
-    let done_count = AtomicU32::new(0);
-    let err_count = AtomicU32::new(0);
-    let orig_acc = AtomicU64::new(0);
-    let comp_acc = AtomicU64::new(0);
-    let manifest = Mutex::new(Vec::<(String, String)>::new());
-
-    pool.install(|| {
-        to_encode.par_iter().for_each(|entry| {
-            // Read + decode + encode (no lock held)
-            let result = (|| -> Result<(String, Vec<u8>, u64), String> {
-                let raw = pread_entry(src_file, entry)?;
-                let orig_bytes = raw.len() as u64;
-                let (rgba, w, h) = decode_to_rgba(&raw)?;
-                drop(raw);
-                let avif = unsafe { crate::encode_avif_raw(&rgba, w, h, quality, speed) }
-                    .map_err(|c| format!("avif error {c}: {}", entry.name))?;
-                drop(rgba);
-                let avif_name = get_avif_name(&entry.name);
-                Ok((avif_name, avif, orig_bytes))
-            })();
-
-            match result {
-                Ok((avif_name, avif, orig_bytes)) => {
-                    let comp_bytes = avif.len() as u64;
-                    // Lock, write, unlock — avif data freed after this block
-                    {
-                        let mut w = writer_mu.lock().unwrap();
-                        let _ = w.add_file(&avif_name, &avif);
-                    }
-                    manifest.lock().unwrap().push((entry.name.clone(), avif_name.clone()));
-                    let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    orig_acc.fetch_add(orig_bytes, Ordering::Relaxed);
-                    comp_acc.fetch_add(comp_bytes, Ordering::Relaxed);
-                    if d % 10 == 0 || d == n_encode {
-                        progress.task_done(d, n_encode, &avif_name,
-                            orig_acc.load(Ordering::Relaxed),
-                            comp_acc.load(Ordering::Relaxed));
-                    }
-                }
-                Err(msg) => {
-                    err_count.fetch_add(1, Ordering::Relaxed);
-                    let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    progress.warning(&format!("[{d}/{n_encode}] {msg}"));
-                }
+    // 5. Split encode list: cached vs fresh
+    let mut cached_entries: Vec<&RpaEntry> = Vec::new();
+    let mut fresh_entries: Vec<&RpaEntry> = Vec::new();
+    for entry in &to_encode {
+        if let Some(cd) = cache_dir {
+            if cd.join(cache_key(&entry.name, quality, speed)).exists() {
+                cached_entries.push(entry);
+                continue;
             }
+        }
+        fresh_entries.push(entry);
+    }
+    let n_cached = cached_entries.len() as u32;
+    let n_fresh = fresh_entries.len() as u32;
+
+    let mut manifest_entries: Vec<(String, String)> = Vec::new();
+    let mut orig_total: u64 = 0;
+    let mut comp_total: u64 = 0;
+
+    // 5a. Restore cached entries (sequential, fast I/O only)
+    let mut dt_cache = 0.0f64;
+    if n_cached > 0 {
+        progress.phase_start(n_cached,
+            &format!("Restoring {} cached images", n_cached));
+        let t0 = Instant::now();
+        for (i, entry) in cached_entries.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(BuildStats {
+                    total_entries: n_encode + n_pass, encoded: i as u32,
+                    passthrough: n_pass, original_bytes: orig_total,
+                    compressed_bytes: comp_total, encode_errors: 0,
+                    cache_hits: i as u32, cancelled: true,
+                    timing: BuildTiming::default(),
+                });
+            }
+            let avif_name = get_avif_name(&entry.name);
+            let cached = read_cache(cache_dir.unwrap(), &entry.name, quality, speed)
+                .ok_or_else(|| format!("cache miss for {}", entry.name))?;
+            let orig_bytes = entry.length + entry.prefix.len() as u64;
+            let comp_bytes = cached.len() as u64;
+            writer.add_file(&avif_name, &cached)
+                .map_err(|e| format!("write cached '{}': {e}", avif_name))?;
+            manifest_entries.push((entry.name.clone(), avif_name.clone()));
+            orig_total += orig_bytes;
+            comp_total += comp_bytes;
+            if (i + 1) % 100 == 0 || i + 1 == cached_entries.len() {
+                progress.task_done((i + 1) as u32, n_cached, &avif_name,
+                    orig_total, comp_total);
+            }
+        }
+        dt_cache = t0.elapsed().as_secs_f64();
+        let cache_mb = comp_total as f64 / 1_048_576.0;
+        progress.phase_end(n_cached, &format!("Cache restored ({:.1}s, {:.0} MB, {:.0} MB/s)",
+            dt_cache, cache_mb, cache_mb / dt_cache.max(0.001)), orig_total, comp_total);
+    }
+
+    // 5b. Parallel encode fresh (uncached) entries
+    let mut errors: u32 = 0;
+    let mut dt_encode = 0.0f64;
+    if n_fresh > 0 {
+        progress.phase_start(n_fresh,
+            &format!("Encoding {} images (q={}, s={}, w={})",
+                     n_fresh, quality, speed, workers));
+
+        let t0 = Instant::now();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .map_err(|e| format!("rayon pool: {e}"))?;
+
+        let writer_mu = Mutex::new(writer);
+        let done_count = AtomicU32::new(0);
+        let err_count = AtomicU32::new(0);
+        let orig_acc = AtomicU64::new(orig_total);
+        let comp_acc = AtomicU64::new(comp_total);
+        let manifest_mu = Mutex::new(manifest_entries);
+
+        pool.install(|| {
+            fresh_entries.par_iter().for_each(|entry| {
+                if cancel.load(Ordering::Relaxed) { return; }
+
+                let result = (|| -> Result<(String, Vec<u8>, u64), String> {
+                    let avif_name = get_avif_name(&entry.name);
+                    let raw = pread_entry(src_file, entry)?;
+                    let orig_bytes = raw.len() as u64;
+                    let (rgba, w, h) = decode_to_rgba(&raw)?;
+                    drop(raw);
+                    let avif = unsafe { crate::encode_avif_raw(&rgba, w, h, quality, speed) }
+                        .map_err(|c| format!("avif error {c}: {}", entry.name))?;
+                    drop(rgba);
+
+                    if let Some(cd) = cache_dir {
+                        write_cache(cd, &entry.name, quality, speed, &avif);
+                    }
+
+                    Ok((avif_name, avif, orig_bytes))
+                })();
+
+                match result {
+                    Ok((avif_name, avif, orig_bytes)) => {
+                        let comp_bytes = avif.len() as u64;
+                        {
+                            let mut w = writer_mu.lock().unwrap();
+                            let _ = w.add_file(&avif_name, &avif);
+                        }
+                        manifest_mu.lock().unwrap().push((entry.name.clone(), avif_name.clone()));
+                        let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        orig_acc.fetch_add(orig_bytes, Ordering::Relaxed);
+                        comp_acc.fetch_add(comp_bytes, Ordering::Relaxed);
+                        if d % 10 == 0 || d == n_fresh {
+                            progress.task_done(d, n_fresh, &avif_name,
+                                orig_acc.load(Ordering::Relaxed),
+                                comp_acc.load(Ordering::Relaxed));
+                        }
+                    }
+                    Err(msg) => {
+                        err_count.fetch_add(1, Ordering::Relaxed);
+                        let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        progress.warning(&format!("[{d}/{n_fresh}] {msg}"));
+                    }
+                }
+            });
         });
-    });
 
-    let orig_total = orig_acc.load(Ordering::Relaxed);
-    let comp_total = comp_acc.load(Ordering::Relaxed);
-    let errors = err_count.load(Ordering::Relaxed);
-    let encoded = n_encode - errors;
+        dt_encode = t0.elapsed().as_secs_f64();
+        orig_total = orig_acc.load(Ordering::Relaxed);
+        comp_total = comp_acc.load(Ordering::Relaxed);
+        errors = err_count.load(Ordering::Relaxed);
+        let encoded_fresh = done_count.load(Ordering::Relaxed) - errors;
 
-    progress.phase_end(n_encode, "Encoding done", orig_total, comp_total);
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(BuildStats {
+                total_entries: n_encode + n_pass,
+                encoded: n_cached + encoded_fresh,
+                passthrough: n_pass,
+                original_bytes: orig_total, compressed_bytes: comp_total,
+                encode_errors: errors, cache_hits: n_cached, cancelled: true,
+                timing: BuildTiming::default(),
+            });
+        }
+
+        progress.phase_end(n_fresh, &format!("Encoding done ({:.1}s, {:.1} img/s)",
+            dt_encode, n_fresh as f64 / dt_encode.max(0.001)), orig_total, comp_total);
+        manifest_entries = manifest_mu.into_inner().unwrap();
+        writer = writer_mu.into_inner().unwrap();
+    }
 
     // 6. Write manifest into RPA
+    let t0 = Instant::now();
     progress.phase_start(1, "Writing manifest");
-    let manifest_entries = manifest.into_inner().unwrap();
     let manifest_json = build_manifest_json(&manifest_entries);
-    {
-        let mut w = writer_mu.lock().unwrap();
-        w.add_file("renpak_manifest.json", manifest_json.as_bytes())
-            .map_err(|e| format!("write manifest: {e}"))?;
-    }
+    writer.add_file("renpak_manifest.json", manifest_json.as_bytes())
+        .map_err(|e| format!("write manifest: {e}"))?;
     progress.phase_end(1, "Manifest written", orig_total, comp_total);
 
     // 7. Finalize RPA (write index)
     progress.phase_start(1, "Finalizing RPA index");
-    let writer = writer_mu.into_inner().unwrap();
     writer.finish().map_err(|e| format!("finalize RPA: {e}"))?;
-    progress.phase_end(1, "RPA written", orig_total, comp_total);
+    let dt_finalize = t0.elapsed().as_secs_f64();
+    progress.phase_end(1, &format!("RPA written ({:.1}s)", dt_finalize), orig_total, comp_total);
 
+    let dt_total = t_total.elapsed().as_secs_f64();
+    let timing = BuildTiming {
+        index_s: dt_index, passthrough_s: dt_pass, cache_s: dt_cache,
+        encode_s: dt_encode, finalize_s: dt_finalize, total_s: dt_total,
+    };
+
+    let encoded = n_cached + n_fresh - errors;
     Ok(BuildStats {
         total_entries: n_encode + n_pass,
         encoded,
@@ -295,6 +435,9 @@ pub fn build(
         original_bytes: orig_total,
         compressed_bytes: comp_total,
         encode_errors: errors,
+        cache_hits: n_cached,
+        cancelled: false,
+        timing,
     })
 }
 
@@ -363,7 +506,8 @@ pub unsafe extern "C" fn renpak_build(
     };
     let prog = CbProgress(progress_cb);
     let no_exclude: Vec<String> = Vec::new();
-    match build(Path::new(input), Path::new(output), quality, speed, w, &no_exclude, &prog) {
+    let cancel = AtomicBool::new(false);
+    match build(Path::new(input), Path::new(output), quality, speed, w, &no_exclude, &prog, &cancel, None) {
         Ok(_) => 0,
         Err(_) => -1,
     }

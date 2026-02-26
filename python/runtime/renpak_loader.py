@@ -31,7 +31,9 @@ def install():
         f.close()
         if isinstance(data, bytes):
             data = data.decode("utf-8")
-        _manifest = json.loads(data)
+        raw = json.loads(data)
+        # Normalize keys to lowercase — Ren'Py may request with different casing
+        _manifest = {k.lower(): v for k, v in raw.items()}
         renpy.display.log.write("renpak: loaded manifest with %d entries" % len(_manifest))
     except Exception as e:
         renpy.display.log.write("renpak: no manifest found, disabled (%s)" % e)
@@ -125,10 +127,9 @@ def _decode_frame_png(avis_data, frame_idx):
 def _file_open_callback(name):
     # type: (str) -> object
     """Redirect requests for original image names to their compressed versions."""
-    if name not in _manifest:
+    entry = _manifest.get(name.lower())
+    if entry is None:
         return None
-
-    entry = _manifest[name]
 
     if isinstance(entry, str):
         # Scatter AVIF path — load from archive and tag as AVIF
@@ -137,7 +138,8 @@ def _file_open_callback(name):
             if f is not None:
                 f._renpak_avif = True
             return f
-        except Exception:
+        except Exception as e:
+            renpy.display.log.write("renpak: load_from_archive(%s) failed: %s" % (entry, e))
             return None
     elif isinstance(entry, dict) and _rt_lib is not None:
         # AVIS sequence path
@@ -147,7 +149,8 @@ def _file_open_callback(name):
             avis_data = _load_avis_bytes(avis_name)
             png_bytes = _decode_frame_png(avis_data, frame_idx)
             return io.BytesIO(png_bytes)
-        except Exception:
+        except Exception as e:
+            renpy.display.log.write("renpak: avis decode(%s) failed: %s" % (entry, e))
             return None
 
     return None
@@ -156,7 +159,7 @@ def _file_open_callback(name):
 def _loadable_callback(name):
     # type: (str) -> bool
     """Tell Ren'Py that original image names are still loadable."""
-    return name in _manifest
+    return name.lower() in _manifest
 
 
 def _patch_load_image():
@@ -175,6 +178,10 @@ def _patch_load_image():
             if base:
                 filename = base + '.avif'
 
-        return orig(f, filename, size=size)
+        try:
+            return orig(f, filename, size=size)
+        except Exception as e:
+            renpy.display.log.write("renpak: load_image(%s) failed: %s" % (filename, e))
+            raise
 
     renpy.display.pgrender.load_image = _patched_load_image

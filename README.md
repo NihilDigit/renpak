@@ -64,16 +64,25 @@ renpak
 
 The interactive TUI guides you through the full process:
 
-**1. Analyze** — scans the RPA and lists all image directories with file counts and sizes. Use arrow keys to navigate, Space to toggle exclusions (GUI directories are excluded by default), +/- to adjust AVIF quality (0–63, default 60). Press Enter to start.
+**1. Analyze** — scans the RPA and lists all image directories as a collapsible tree with file counts and sizes. Navigate with arrow keys, Space to toggle exclusions (UI directories are excluded by default), Enter to expand/collapse. Tab cycles between four blocks:
+
+- **Directories** — tree view of image directories with checkbox toggles
+- **Quality** — three presets: High (q75/s6), Medium (q60/s8), Low (q40/s10)
+- **Performance** — three tiers: Low, Medium, High (maps to ¼, ½, all CPU cores)
+- **Actions** — summary stats, Start and Quit buttons
+
+Mouse clicks work everywhere. The TUI checks available disk space before starting and detects already-compressed RPAs (skips straight to Done screen).
 
 **2. Build** — encodes images in parallel using all available cores. Shows a live progress bar with compression ratio, encoding rate, and ETA.
 
-**3. Done** — displays final stats. From here:
-- `i` — Install: backs up the original RPA, swaps in the compressed one, writes the runtime plugin
-- `l` — Launch: starts the game so you can verify everything works
-- `r` — Revert: restores the original RPA and removes the runtime plugin
-- `d` — Delete backup: cleans up the backup once you're satisfied
-- `q` — Quit
+**3. Done** — displays final stats (timing breakdown, compression ratio, encoding rate). From here you can:
+- **Install** — backs up the original RPA, swaps in the compressed one, writes the runtime plugin
+- **Launch** — starts the game so you can verify everything works
+- **Revert** — restores the original RPA and removes the runtime plugin
+- **Delete backup** — cleans up the backup once you're satisfied
+- **Quit**
+
+Navigate with Left/Right, activate with Enter. If the build was cancelled, you can resume from where it left off (cached frames are reused).
 
 ### Headless mode
 
@@ -97,7 +106,8 @@ Options:
 2. Classifies entries: images (.webp, .png, .jpg) are candidates for AVIF encoding; everything else passes through
 3. Decodes each image to RGBA, encodes to AVIF using libavif (rav1e encoder, YUV444, full range)
 4. Writes a new RPA with AVIF-encoded images renamed (e.g., `foo.webp` → `foo.webp._renpak_avif`) and a JSON manifest mapping original names to new names
-5. Encoding runs in parallel via Rayon with bounded memory — one image buffer per worker thread, streaming writes through a `Mutex<RpaWriter>`
+5. Encoding runs in parallel via Rayon with configurable worker count, streaming writes through a `Mutex<RpaWriter>`
+6. Encoded frames are cached to disk — re-running a build skips already-encoded images
 
 ### Runtime phase
 
@@ -105,7 +115,7 @@ Two small files are deployed to the game's `game/` directory:
 
 - `renpak_init.rpy` — runs at `init -999` to bootstrap the loader before any game code
 - `renpak_loader.py` — installs three Ren'Py hooks:
-  - `file_open_callback` — when the game requests `foo.webp`, checks the manifest, opens `foo.webp._renpak_avif` instead
+  - `file_open_callback` — when the game requests `foo.webp`, checks the manifest (case-insensitive), opens `foo.webp._renpak_avif` instead
   - `loadable_callback` — tells Ren'Py that original filenames are still "loadable" so declarations don't break
   - `load_image` monkey-patch — fixes the file extension hint passed to SDL2_image so it correctly decodes AVIF data
 

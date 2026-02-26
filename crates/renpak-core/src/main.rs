@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use renpak_core::pipeline::{self, ProgressReport};
@@ -69,7 +69,7 @@ enum Command {
 }
 
 fn usage() {
-    eprintln!("renpak — AVIF compressor for Ren'Py games");
+    eprintln!("renpak -- AVIF compressor for Ren'Py games");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  renpak                                     TUI (current directory)");
@@ -77,8 +77,9 @@ fn usage() {
     eprintln!("  renpak build <in.rpa> <out.rpa> [options]  Headless build");
     eprintln!();
     eprintln!("Build options:");
-    eprintln!("  -q, --quality <N>   AVIF quality 0-63 (default: 60)");
-    eprintln!("  -s, --speed <N>     Encoder speed 0-10 (default: 8)");
+    eprintln!("  -p, --preset <P>    Quality preset: high, medium, low (default: medium)");
+    eprintln!("  -q, --quality <N>   AVIF quality 0-100 (overrides preset)");
+    eprintln!("  -s, --speed <N>     Encoder speed 0-10 (overrides preset)");
     eprintln!("  -w, --workers <N>   Worker threads (default: auto)");
     eprintln!("  -x, --exclude <P>   Exclude prefix (repeatable)");
 }
@@ -86,7 +87,6 @@ fn usage() {
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    // No args or --help
     if args.is_empty() {
         let cwd = std::env::current_dir().map_err(|e| format!("current dir: {e}"))?;
         return Ok(Command::Tui(cwd));
@@ -110,6 +110,16 @@ fn parse_args() -> Result<Command, String> {
         let mut i = 3;
         while i < args.len() {
             match args[i].as_str() {
+                "-p" | "--preset" => {
+                    i += 1;
+                    match args.get(i).map(|s| s.as_str()) {
+                        Some("high") => { quality = 75; speed = 6; }
+                        Some("medium") => { quality = 60; speed = 8; }
+                        Some("low") => { quality = 40; speed = 10; }
+                        Some(o) => return Err(format!("Unknown preset: {o} (use high/medium/low)")),
+                        None => return Err("--preset requires a value".into()),
+                    }
+                }
                 "-q" | "--quality" => { i += 1; quality = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(60); }
                 "-s" | "--speed" => { i += 1; speed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(8); }
                 "-w" | "--workers" => { i += 1; workers = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(workers); }
@@ -127,13 +137,19 @@ fn parse_args() -> Result<Command, String> {
 // --- Headless build ---
 
 fn run_headless(input: &Path, output: &Path, quality: i32, speed: i32, workers: usize, exclude: &[String]) {
+    let cancel = AtomicBool::new(false);
     let progress = CliProgress::new();
-    match pipeline::build(input, output, quality, speed, workers, exclude, &progress) {
+    match pipeline::build(input, output, quality, speed, workers, exclude, &progress, &cancel, None) {
+        Ok(stats) if stats.cancelled => {
+            eprintln!("\nCancelled.");
+            std::process::exit(130);
+        }
         Ok(stats) => {
             let orig_mb = stats.original_bytes as f64 / 1_048_576.0;
             let comp_mb = stats.compressed_bytes as f64 / 1_048_576.0;
-            eprintln!("\nDone: {} encoded, {} passthrough, {} errors",
-                stats.encoded, stats.passthrough, stats.encode_errors);
+            eprintln!("\nDone: {} encoded, {} passthrough, {} errors{}",
+                stats.encoded, stats.passthrough, stats.encode_errors,
+                if stats.cache_hits > 0 { format!(", {} cached", stats.cache_hits) } else { String::new() });
             eprintln!("Images: {:.0} MB -> {:.0} MB ({:.0}%)", orig_mb, comp_mb,
                 if orig_mb > 0.0 { comp_mb / orig_mb * 100.0 } else { 0.0 });
         }

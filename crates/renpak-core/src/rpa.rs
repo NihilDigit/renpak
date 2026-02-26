@@ -204,6 +204,7 @@ impl RpaWriter {
     }
 
     /// Copy raw bytes from a source file at the given offset+length.
+    /// `buf` is a reusable scratch buffer to avoid per-call allocation.
     pub fn add_file_from(
         &mut self,
         name: &str,
@@ -211,19 +212,21 @@ impl RpaWriter {
         src_offset: u64,
         src_length: u64,
         prefix: &[u8],
+        buf: &mut Vec<u8>,
     ) -> io::Result<()> {
         let offset = self.file.stream_position()?;
         if !prefix.is_empty() {
             self.file.write_all(prefix)?;
         }
         // Read from source using pread and write in chunks
+        let chunk_size = buf.len().max(1024 * 1024); // at least 1MB
+        buf.resize(chunk_size, 0);
         let mut remaining = src_length as usize;
         let mut src_pos = src_offset;
-        let mut chunk = vec![0u8; 256 * 1024]; // 256KB chunks
         while remaining > 0 {
-            let to_read = remaining.min(chunk.len());
-            read_exact_at(src, &mut chunk[..to_read], src_pos)?;
-            self.file.write_all(&chunk[..to_read])?;
+            let to_read = remaining.min(chunk_size);
+            read_exact_at(src, &mut buf[..to_read], src_pos)?;
+            self.file.write_all(&buf[..to_read])?;
             src_pos += to_read as u64;
             remaining -= to_read;
         }
