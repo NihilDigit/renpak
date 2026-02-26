@@ -8,9 +8,9 @@ fn main() {
         .probe("libavif")
         .is_ok()
     {
-        // libavif's .pc may not list rav1e in Libs.private, so link it explicitly
+        // libavif's .pc may not list aom in Libs.private, so link it explicitly
         if statik {
-            let _ = pkg_config::Config::new().statik(true).probe("rav1e");
+            let _ = pkg_config::Config::new().statik(true).probe("aom");
         }
         return;
     }
@@ -20,21 +20,10 @@ fn main() {
         println!("cargo:rustc-link-search=native={prefix}/lib");
         if statik {
             println!("cargo:rustc-link-lib=static=avif");
-            // rav1e static lib
-            if let Ok(rav1e) = std::env::var("RAV1E_PREFIX") {
-                println!("cargo:rustc-link-search=native={rav1e}/lib");
+            if let Ok(aom) = std::env::var("AOM_PREFIX") {
+                println!("cargo:rustc-link-search=native={aom}/lib");
             }
-            println!("cargo:rustc-link-lib=static=rav1e");
-            // Windows system libs needed for static linking
-            if cfg!(target_os = "windows") {
-                println!("cargo:rustc-link-lib=ws2_32");
-                println!("cargo:rustc-link-lib=userenv");
-                println!("cargo:rustc-link-lib=bcrypt");
-                println!("cargo:rustc-link-lib=ntdll");
-                // rav1e's static lib bundles the Rust runtime, which conflicts
-                // with our own Rust runtime. Allow duplicate symbols.
-                println!("cargo:rustc-link-arg=/FORCE:MULTIPLE");
-            }
+            println!("cargo:rustc-link-lib=static=aom");
         } else {
             println!("cargo:rustc-link-lib=avif");
         }

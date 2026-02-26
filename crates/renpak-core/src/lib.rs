@@ -1,7 +1,7 @@
 //! renpak-core: Build-time encoder and build engine.
 //!
 //! Exports C ABI for Python ctypes.
-//! Links against system libavif (with rav1e encoder).
+//! Links against system libavif (with aom encoder).
 
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
