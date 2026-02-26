@@ -161,66 +161,6 @@ jobs:
           name: renpak-macos-aarch64
           path: renpak-macos-aarch64.tar.gz
 
-  build-macos-x86_64:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build tools
-        run: |
-          brew install cmake ninja pkg-config nasm
-          rustup target add x86_64-apple-darwin
-
-      - name: Build aom for x86_64 (static, encoder only)
-        run: |
-          git clone --depth 1 --branch v${AOM_VERSION} https://aomedia.googlesource.com/aom /tmp/aom
-          cd /tmp/aom
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            -DAOM_TARGET_CPU=x86_64 \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DCONFIG_AV1_ENCODER=1 -DCONFIG_AV1_DECODER=0 \
-            -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DENABLE_DOCS=OFF \
-            -DCMAKE_INSTALL_PREFIX=/tmp/x86_64-deps
-          cmake --build build -j$(sysctl -n hw.ncpu)
-          cmake --install build
-
-      - name: Build libavif for x86_64 (static)
-        run: |
-          git clone --depth 1 --branch v${LIBAVIF_VERSION} https://github.com/AOMediaCodec/libavif /tmp/libavif
-          cd /tmp/libavif
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DAVIF_CODEC_AOM=SYSTEM -DAVIF_CODEC_AOM_DECODE=OFF \
-            -DCMAKE_PREFIX_PATH=/tmp/x86_64-deps \
-            -DAVIF_CODEC_RAV1E=OFF -DAVIF_CODEC_DAV1D=OFF -DAVIF_CODEC_SVT=OFF \
-            -DAVIF_LIBYUV=OFF \
-            -DCMAKE_INSTALL_PREFIX=/tmp/x86_64-deps
-          cmake --build build -j$(sysctl -n hw.ncpu)
-          cmake --install build
-
-      - name: Build renpak for x86_64
-        env:
-          RENPAK_STATIC: "1"
-          AVIF_PREFIX: /tmp/x86_64-deps
-          AOM_PREFIX: /tmp/x86_64-deps
-          PKG_CONFIG_PATH: /tmp/x86_64-deps/lib/pkgconfig
-        run: cargo build --release --target x86_64-apple-darwin
-
-      - name: Package
-        run: |
-          strip target/x86_64-apple-darwin/release/renpak
-          tar czf renpak-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release renpak
-
-      - name: Upload
-        uses: actions/upload-artifact@v4
-        with:
-          name: renpak-macos-x86_64
-          path: renpak-macos-x86_64.tar.gz
-
   build-windows-x86_64:
     runs-on: windows-latest
     steps:
@@ -327,7 +267,7 @@ jobs:
           path: renpak-windows-aarch64.zip
 
   release:
-    needs: [build-linux-x86_64, build-linux-aarch64, build-macos-aarch64, build-macos-x86_64, build-windows-x86_64, build-windows-aarch64]
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos-aarch64, build-windows-x86_64, build-windows-aarch64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
