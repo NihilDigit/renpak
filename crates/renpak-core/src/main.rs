@@ -69,8 +69,11 @@ enum Command {
 }
 
 fn usage() {
+    eprintln!("renpak — AVIF compressor for Ren'Py games");
+    eprintln!();
     eprintln!("Usage:");
-    eprintln!("  renpak <game_dir>                          Interactive TUI");
+    eprintln!("  renpak                                     TUI (current directory)");
+    eprintln!("  renpak <game_dir>                          TUI (specified directory)");
     eprintln!("  renpak build <in.rpa> <out.rpa> [options]  Headless build");
     eprintln!();
     eprintln!("Build options:");
@@ -82,9 +85,15 @@ fn usage() {
 
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // No args or --help
     if args.is_empty() {
+        let cwd = std::env::current_dir().map_err(|e| format!("current dir: {e}"))?;
+        return Ok(Command::Tui(cwd));
+    }
+    if args[0] == "-h" || args[0] == "--help" {
         usage();
-        return Err("No arguments provided".into());
+        std::process::exit(0);
     }
 
     if args[0] == "build" {

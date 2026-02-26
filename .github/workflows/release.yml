@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake nasm meson ninja-build pkg-config
+
+      - name: Cache cargo-c
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-c*
+          key: cargo-c-0.10
+
+      - name: Install cargo-c
+        run: |
+          if ! command -v cargo-cinstall &>/dev/null; then
+            cargo install cargo-c --version 0.10.7
+          fi
+
+      - name: Build rav1e (static C library)
+        run: |
+          git clone --depth 1 --branch v0.7.1 https://github.com/xiph/rav1e /tmp/rav1e
+          cd /tmp/rav1e
+          cargo cinstall --release --prefix=/usr/local --library-type=staticlib
+          sudo ldconfig
+
+      - name: Build libavif (static, rav1e only)
+        run: |
+          git clone --depth 1 --branch v1.1.1 https://github.com/AOMediaCodec/libavif /tmp/libavif
+          cd /tmp/libavif
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DAVIF_CODEC_RAV1E=SYSTEM \
+            -DAVIF_CODEC_DAV1D=OFF \
+            -DAVIF_CODEC_AOM=OFF \
+            -DAVIF_CODEC_SVT=OFF \
+            -DAVIF_LIBYUV=OFF
+          cmake --build build -j$(nproc)
+          sudo cmake --install build
+          sudo ldconfig
+
+      - name: Build renpak (static link)
+        run: RENPAK_STATIC=1 cargo build --release
+
+      - name: Package
+        run: |
+          strip target/release/renpak
+          tar czf renpak-linux-x86_64.tar.gz -C target/release renpak
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: renpak-linux-x86_64
+          path: renpak-linux-x86_64.tar.gz
+
+  build-linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake nasm meson ninja-build pkg-config
+
+      - name: Install cargo-c
+        run: cargo install cargo-c --version 0.10.7
+
+      - name: Build rav1e (static C library)
+        run: |
+          git clone --depth 1 --branch v0.7.1 https://github.com/xiph/rav1e /tmp/rav1e
+          cd /tmp/rav1e
+          cargo cinstall --release --prefix=/usr/local --library-type=staticlib
+          sudo ldconfig
+
+      - name: Build libavif (static, rav1e only)
+        run: |
+          git clone --depth 1 --branch v1.1.1 https://github.com/AOMediaCodec/libavif /tmp/libavif
+          cd /tmp/libavif
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DAVIF_CODEC_RAV1E=SYSTEM \
+            -DAVIF_CODEC_DAV1D=OFF \
+            -DAVIF_CODEC_AOM=OFF \
+            -DAVIF_CODEC_SVT=OFF \
+            -DAVIF_LIBYUV=OFF
+          cmake --build build -j$(nproc)
+          sudo cmake --install build
+          sudo ldconfig
+
+      - name: Build renpak (static link)
+        run: RENPAK_STATIC=1 cargo build --release
+
+      - name: Package
+        run: |
+          strip target/release/renpak
+          tar czf renpak-linux-aarch64.tar.gz -C target/release renpak
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: renpak-linux-aarch64
+          path: renpak-linux-aarch64.tar.gz
+
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            arch: x86_64
+          - runner: macos-14
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          brew install cmake nasm meson ninja pkg-config
+          cargo install cargo-c --version 0.10.7
+
+      - name: Build rav1e (static C library)
+        run: |
+          git clone --depth 1 --branch v0.7.1 https://github.com/xiph/rav1e /tmp/rav1e
+          cd /tmp/rav1e
+          cargo cinstall --release --prefix=/usr/local --library-type=staticlib
+
+      - name: Build libavif (static, rav1e only)
+        run: |
+          git clone --depth 1 --branch v1.1.1 https://github.com/AOMediaCodec/libavif /tmp/libavif
+          cd /tmp/libavif
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DAVIF_CODEC_RAV1E=SYSTEM \
+            -DAVIF_CODEC_DAV1D=OFF \
+            -DAVIF_CODEC_AOM=OFF \
+            -DAVIF_CODEC_SVT=OFF \
+            -DAVIF_LIBYUV=OFF
+          cmake --build build -j$(sysctl -n hw.ncpu)
+          sudo cmake --install build
+
+      - name: Build renpak (static link)
+        run: RENPAK_STATIC=1 cargo build --release
+
+      - name: Package
+        run: |
+          strip target/release/renpak
+          tar czf renpak-macos-${{ matrix.arch }}.tar.gz -C target/release renpak
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: renpak-macos-${{ matrix.arch }}
+          path: renpak-macos-${{ matrix.arch }}.tar.gz
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: choco install nasm -y
+
+      - name: Install cargo-c
+        run: cargo install cargo-c --version 0.10.7
+
+      - name: Build rav1e (static C library)
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v0.7.1 https://github.com/xiph/rav1e /c/rav1e
+          cd /c/rav1e
+          cargo cinstall --release --prefix=C:/deps --library-type=staticlib
+
+      - name: Build libavif (static, rav1e only)
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v1.1.1 https://github.com/AOMediaCodec/libavif /c/libavif
+          cd /c/libavif
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DAVIF_CODEC_RAV1E=SYSTEM \
+            -DCMAKE_PREFIX_PATH=C:/deps \
+            -DAVIF_CODEC_DAV1D=OFF \
+            -DAVIF_CODEC_AOM=OFF \
+            -DAVIF_CODEC_SVT=OFF \
+            -DAVIF_LIBYUV=OFF \
+            -DCMAKE_INSTALL_PREFIX=C:/deps
+          cmake --build build --config Release
+          cmake --install build
+
+      - name: Build renpak (static link)
+        shell: bash
+        env:
+          RENPAK_STATIC: "1"
+          AVIF_PREFIX: "C:/deps"
+          RAV1E_PREFIX: "C:/deps"
+        run: cargo build --release
+
+      - name: Package
+        run: Compress-Archive -Path target\release\renpak.exe -DestinationPath renpak-windows-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: renpak-windows-x86_64
+          path: renpak-windows-x86_64.zip
+
+  release:
+    needs: [build-linux-x86_64, build-linux-aarch64, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            renpak-*.tar.gz
+            renpak-*.zip
+          generate_release_notes: true
