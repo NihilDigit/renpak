@@ -1,0 +1,8 @@
+target/
+crates/
+python/
+docs/
+.git/
+*.rpa
+Cargo.lock
+Cargo.toml

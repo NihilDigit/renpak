@@ -1,91 +1,93 @@
 # renpak
 
-Ren'Py 游戏资产压缩工具链，面向 HS2/Koikatsu 等 3D 渲染视觉小说。
-Rust CLI + 运行时 Ren'Py 插件 (Python + Rust cdylib)。
+AVIF compression toolchain for Ren'Py games (targeting HS2/Koikatsu-style 3D-rendered visual novels).
+Rust CLI with interactive TUI + runtime Ren'Py plugin.
 
-许可证：MPL-2.0
+License: MPL-2.0
 
-## 架构
+## Architecture
 
-两个 Rust crate + 运行时插件：
+Two Rust crates + runtime plugin:
 
-- `crates/renpak-core/` — 构建期核心：RPA 读写、AVIF/AVIS 编码、并行管线、CLI
-- `crates/renpak-rt/` — 运行时解码器：AVIS 帧级随机访问，导出 extern "C" API 供 ctypes 调用
-- `python/runtime/` — 部署到游戏 `game/` 目录的运行时插件 (.rpy + .py)
-- `install.sh` — 一键压缩 + 部署脚本
+- `crates/renpak-core/` — Build engine: RPA read/write, AVIF/AVIS encoding, parallel pipeline, CLI, TUI
+- `crates/renpak-rt/` — Runtime decoder: AVIS frame-level random access, exports extern "C" API for ctypes
+- `python/runtime/` — Deployed to game `game/` directory (.rpy + .py)
+- `install.sh` — Builds and symlinks `renpak` binary to ~/.local/bin/
 
-详细设计见 `docs/PLAN.md`。
-
-## 构建
+## Build
 
 ```bash
 cargo build --release
 ```
 
-## 技术约束
+Static linking for distribution (used by CI):
 
-### Ren'Py 运行时环境
+```bash
+RENPAK_STATIC=1 cargo build --release
+```
 
-- 运行时插件跑在 Ren'Py 内置的 Python 3.9.10 (CPython) 上，不是系统 Python
-- 原生库通过 ctypes.CDLL 加载，必须导出纯 C ABI (extern "C")，不用 PyO3
-- 运行时 Python 代码不能依赖任何第三方包，只能用标准库 + Ren'Py 自带模块
-- Ren'Py 的图像预加载在后台线程运行，Rust 解码器必须线程安全（用 per-thread context，无全局状态）
+## Technical Constraints
 
-### 编码硬约束
+### Ren'Py Runtime Environment
 
-- AVIF 色彩空间：必须显式设置 CICP (primaries=1, transfer=13, matrix=1, range=full)，否则 HS2 渲染图会偏色
-- 分辨率：编码前 pad 到 8 的倍数，解码后裁剪回原始尺寸（Ren'Py Issue #5061）
-- AVIS GOP：默认星型 (帧0=I帧，其余 P 帧只参考帧0)，保证 O(1) 随机访问
-- 视频重编码保持 .webm 容器，Ren'Py 的 ffmpeg 自动识别 AV1 codec，无需运行时钩子
+- Runtime plugin runs on Ren'Py's bundled Python 3.9.10 (CPython), not system Python
+- Native libraries loaded via ctypes.CDLL — must export pure C ABI (extern "C"), no PyO3
+- Runtime Python code cannot depend on any third-party packages — stdlib + Ren'Py builtins only
+- Ren'Py's image preloader runs on background threads — Rust decoder must be thread-safe (per-thread context, no global state)
 
-### 钩子机制
+### Encoding Constraints
 
-运行时通过以下 Ren'Py 钩子接入，不修改引擎源码：
+- AVIF color space: must explicitly set CICP (primaries=1, transfer=13, matrix=1, range=full) — HS2 renders will color-shift otherwise
+- Resolution: pad to multiple of 8 before encoding, crop back after decoding (Ren'Py Issue #5061)
+- AVIS GOP: star pattern (frame 0 = I-frame, rest = P-frames referencing frame 0) for O(1) random access
+- Video re-encoding keeps .webm container — Ren'Py's ffmpeg auto-detects AV1 codec, no runtime hooks needed
 
-- `config.file_open_callback` — 拦截文件请求，做文件名映射和序列解码
-- `config.loadable_callback` — 报告原始文件名可加载
-- monkey-patch `renpy.display.pgrender.load_image` — 修正 AVIF 的扩展名提示让 SDL2_image 正确识别
+### Hook Mechanism
 
-### 跨平台
+Runtime integrates via Ren'Py hooks without engine modifications:
 
-运行时 .so/.dll/.dylib 需要为每个目标平台预编译：
-- Linux x86_64
+- `config.file_open_callback` — intercepts file requests for name mapping and sequence decoding
+- `config.loadable_callback` — reports original filenames as loadable
+- monkey-patch `renpy.display.pgrender.load_image` — fixes AVIF extension hint for SDL2_image
+
+### Cross-Platform
+
+Runtime .so/.dll/.dylib must be pre-built for each target:
+- Linux x86_64 / aarch64
 - Windows x86_64
-- macOS x86_64 + aarch64
+- macOS x86_64 / aarch64
 
-## 代码规范
+CI builds static binaries via GitHub Actions (tag `v*` to trigger).
+
+## Code Standards
 
 ### Rust
 
-- Edition 2021，MSRV 跟随当前 stable
-- `renpak-rt` 编译为 cdylib，导出函数用 `#[no_mangle] pub extern "C"`
-- 错误处理：核心库用 `Result<T, renpak_core::Error>`；FFI 边界用返回码 (0=成功, 负数=错误)
-- FFI 内存：Rust 分配的 buffer 必须通过 `renpak_free_buffer` 释放，不能让 Python 侧 free
+- Edition 2021, MSRV follows current stable
+- `renpak-rt` compiles as cdylib, exported functions use `#[no_mangle] pub extern "C"`
+- Error handling: core library uses `Result<T, String>`; FFI boundary uses return codes (0=ok, negative=error)
+- FFI memory: Rust-allocated buffers must be freed via `renpak_free_buffer`, never by Python
 
-### Python（仅运行时插件）
+### Python (runtime plugin only)
 
-- 运行时代码 (python/runtime/) 必须兼容 Python 3.9，不能用 3.10+ 语法 (match/case, type union X|Y 等)
-- 不能依赖任何第三方包，只能用标准库 + Ren'Py 自带模块
+- Must be compatible with Python 3.9 — no 3.10+ syntax (match/case, type union X|Y, etc.)
+- No third-party dependencies — stdlib + Ren'Py builtins only
 
-### 测试
-
-- Rust: `cargo test`
-- 端到端: `tests/` 目录
-
-## 常用命令
+## Common Commands
 
 ```bash
-cargo build --release                                    # 构建
-cargo test                                               # 测试
-./target/release/renpak input.rpa output.rpa -q 60       # 压缩 RPA
-./install.sh /path/to/game                               # 一键安装
+cargo build --release                    # build
+cargo test                               # test
+renpak                                   # TUI (current directory)
+renpak /path/to/game                     # TUI (specified directory)
+renpak build in.rpa out.rpa -q 60        # headless build
 ```
 
-## 不要做的事
+## Do Not
 
-- 不要修改 Ren'Py 引擎源码，所有集成通过钩子和 monkey-patch 完成
-- 不要在运行时 Python 代码中引入第三方依赖
-- 不要用 PyO3，ctypes 是唯一的 FFI 路径
-- 不要用链式 GOP 作为默认值，随机访问延迟不可控
-- 不要假设 Limited Range YUV，必须显式指定 Full Range
-- 不要把构建输出放到 /tmp — 本机 /tmp 是 tmpfs (12GB)，装不下 RPA 输出（单个 RPA 可达 12GB）。构建输出一律放 /home 下
+- Modify Ren'Py engine source — all integration via hooks and monkey-patches
+- Import third-party packages in runtime Python code
+- Use PyO3 — ctypes is the only FFI path
+- Use chain GOP as default — random access latency becomes unpredictable
+- Assume Limited Range YUV — always specify Full Range explicitly
+- Write build output to /tmp — this machine's /tmp is tmpfs (12GB), too small for RPA output (single RPA can be 12GB+)
