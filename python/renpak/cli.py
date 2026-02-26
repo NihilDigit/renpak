@@ -20,6 +20,7 @@ def main():
     p_build.add_argument("-o", "--output", type=Path, default=None, help="Output directory")
     p_build.add_argument("--limit", type=int, default=0, help="Max images to encode (0 = all)")
     p_build.add_argument("--quality", type=int, default=50, help="AVIF quality 1-63 (default: 50)")
+    p_build.add_argument("-j", "--workers", type=int, default=0, help="Parallel workers (0 = cpu_count)")
 
     # analyze
     p_analyze = subparsers.add_parser("analyze", help="Analyze RPA contents without encoding")
@@ -39,7 +40,8 @@ def main():
 
     if args.command == "build":
         output_dir = args.output or Path(str(args.game_dir) + "_compressed")
-        build(args.game_dir, output_dir, limit=args.limit, quality=args.quality)
+        build(args.game_dir, output_dir, limit=args.limit, quality=args.quality,
+              workers=args.workers)
     elif args.command == "analyze":
         analyze(args.game_dir)
     elif args.command == "info":

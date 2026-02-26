@@ -96,3 +96,4 @@ uv run pytest                            # Python 测试
 - 不要用 PyO3，ctypes 是唯一的 FFI 路径
 - 不要用链式 GOP 作为默认值，随机访问延迟不可控
 - 不要假设 Limited Range YUV，必须显式指定 Full Range
+- 不要把构建输出放到 /tmp — 本机 /tmp 是 tmpfs (12GB)，装不下 RPA 输出（单个 RPA 可达 12GB）。构建输出一律放 /home 下
