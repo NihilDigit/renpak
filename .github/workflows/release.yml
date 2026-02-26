@@ -178,6 +178,7 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DAOM_TARGET_CPU=x86_64 \
             -DBUILD_SHARED_LIBS=OFF \
             -DCONFIG_AV1_ENCODER=1 -DCONFIG_AV1_DECODER=0 \
             -DENABLE_TESTS=OFF -DENABLE_EXAMPLES=OFF -DENABLE_TOOLS=OFF -DENABLE_DOCS=OFF \
