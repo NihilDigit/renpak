@@ -31,6 +31,9 @@ fn main() {
                 println!("cargo:rustc-link-lib=userenv");
                 println!("cargo:rustc-link-lib=bcrypt");
                 println!("cargo:rustc-link-lib=ntdll");
+                // rav1e's static lib bundles the Rust runtime, which conflicts
+                // with our cdylib's own Rust runtime. Allow duplicate symbols.
+                println!("cargo:rustc-cdylib-link-arg=/FORCE:MULTIPLE");
             }
         } else {
             println!("cargo:rustc-link-lib=avif");
