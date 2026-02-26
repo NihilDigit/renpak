@@ -60,17 +60,28 @@ cargo build --release
 ./install.sh  # symlinks to ~/.local/bin/renpak
 ```
 
-## Usage
+## Quickstart
 
-Point it at a game directory:
+Open a terminal in the game directory and run:
 
 ```bash
-renpak ~/Games/MyGame-1.0-pc
+renpak
 ```
 
-Or just `cd` in and run `renpak` with no arguments.
+1. Select which RPA archives to compress
+2. Pick a quality preset (Medium is a good default)
+3. Hit Start — renpak encodes all images in parallel
 
-The TUI walks you through everything — pick directories to compress, choose a quality preset, hit Start. When it's done, Install swaps in the compressed RPA and drops the runtime plugin into `game/`. Launch the game to verify, Revert if anything looks off.
+When encoding finishes, hit Install. The original RPA is backed up to `.renpak_backup/`, and the compressed archive takes its place. You'll then see:
+
+- Launch — start the game to verify everything looks right
+- Revert — restore the original RPA from backup
+- Delete — remove the backup to free disk space (only do this after you've verified the game)
+- Quit — exit renpak
+
+## Usage
+
+`cd` into a game directory and run `renpak` with no arguments, or pass a path explicitly.
 
 Quality presets:
 
