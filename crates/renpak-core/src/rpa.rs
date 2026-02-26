@@ -8,11 +8,34 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 use std::path::Path;
 
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+
+/// Cross-platform pread: read exact bytes at offset without seeking.
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut pos = 0;
+        while pos < buf.len() {
+            let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected eof"));
+            }
+            pos += n;
+        }
+        Ok(())
+    }
+}
 use flate2::Compression;
 use serde_pickle::DeOptions;
 
@@ -115,7 +138,7 @@ impl RpaReader {
     /// Read file data at the given offset+length using pread (thread-safe).
     pub fn read_file_at(&self, entry: &RpaEntry) -> io::Result<Vec<u8>> {
         let mut buf = vec![0u8; entry.length as usize];
-        self.file.read_exact_at(&mut buf, entry.offset)?;
+        read_exact_at(&self.file, &mut buf, entry.offset)?;
         if !entry.prefix.is_empty() {
             let mut full = Vec::with_capacity(entry.prefix.len() + buf.len());
             full.extend_from_slice(&entry.prefix);
@@ -199,7 +222,7 @@ impl RpaWriter {
         let mut chunk = vec![0u8; 256 * 1024]; // 256KB chunks
         while remaining > 0 {
             let to_read = remaining.min(chunk.len());
-            src.read_exact_at(&mut chunk[..to_read], src_pos)?;
+            read_exact_at(src, &mut chunk[..to_read], src_pos)?;
             self.file.write_all(&chunk[..to_read])?;
             src_pos += to_read as u64;
             remaining -= to_read;

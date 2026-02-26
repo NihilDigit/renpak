@@ -4,12 +4,17 @@
 //! so memory usage stays bounded (~1 AVIF buffer per worker thread).
 
 use std::fs::File;
+use std::io;
 use std::os::raw::c_char;
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::ffi::CString;
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 use rayon::prelude::*;
 
@@ -96,9 +101,29 @@ fn decode_to_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
 
 // --- pread helper ---
 
+/// Cross-platform pread: read exact bytes at offset without seeking.
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        let mut pos = 0;
+        while pos < buf.len() {
+            let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected eof"));
+            }
+            pos += n;
+        }
+        Ok(())
+    }
+}
+
 fn pread_entry(file: &File, entry: &RpaEntry) -> Result<Vec<u8>, String> {
     let mut buf = vec![0u8; entry.length as usize];
-    file.read_exact_at(&mut buf, entry.offset)
+    read_exact_at(file, &mut buf, entry.offset)
         .map_err(|e| format!("pread {}: {e}", entry.name))?;
     if !entry.prefix.is_empty() {
         let mut full = Vec::with_capacity(entry.prefix.len() + buf.len());
