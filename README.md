@@ -2,7 +2,7 @@
 
 AVIF compression toolchain for Ren'Py games. Shrinks RPA archives by re-encoding images to AVIF — games load them transparently at runtime, no engine patches needed.
 
-<!-- TODO: TUI demo GIF -->
+![TUI Demo](demo.mp4)
 
 ## Why bother
 
@@ -12,7 +12,19 @@ renpak handles the whole pipeline: crack open the RPA, re-encode every image in 
 
 ## Results
 
-<!-- TODO: comparison images, LPIPS/SSIM metrics, compression benchmarks across multiple games -->
+Tested on [Eternum](https://caribdis.itch.io/eternum) v0.9.5 (latest public release), Medium preset (quality 60, speed 8):
+
+| | Original | Compressed | |
+|---|---|---|---|
+| RPA archive | 11.3 GiB | 7.2 GiB | 1.56x smaller |
+| Image data | 5.11 GiB | 1.08 GiB | 4.73x smaller |
+
+12,732 images (12,243 JPG + 379 WebP + 110 PNG → AVIF) in 9 min 28 sec on an i7-12650H.
+
+| Metric | Mean | Median | Range | |
+|--------|------|--------|-------|-|
+| SSIM ↑ | 0.950 | 0.957 | 0.892 – 1.000 | 1.0 = identical, >0.95 visually indistinguishable |
+| LPIPS ↓ | 0.071 | 0.065 | 0.000 – 0.180 | 0.0 = identical, <0.1 near-transparent to human eyes |
 
 ## Install
 
