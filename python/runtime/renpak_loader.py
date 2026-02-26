@@ -6,12 +6,17 @@ No third-party dependencies. No 3.10+ syntax.
 
 from __future__ import annotations
 
+import ctypes
+import io
 import json
+import os
 
 # These are available at runtime inside Ren'Py
 import renpy  # type: ignore
 
-_manifest = {}  # type: dict[str, str]  # original_name -> avif_name
+_manifest = {}  # type: dict  # original_name -> str (avif) or dict (avis)
+_rt_lib = None  # type: ctypes.CDLL | None
+_avis_cache = {}  # type: dict[str, bytes]  # avis_name -> raw bytes from archive
 
 
 def install():
@@ -36,6 +41,11 @@ def install():
         renpy.display.log.write("renpak: manifest is empty, nothing to do")
         return
 
+    # Check for AVIS entries and try to load runtime decoder
+    has_avis = any(isinstance(v, dict) for v in _manifest.values())
+    if has_avis:
+        _init_rt_lib()
+
     # Hook 1: file_open_callback — intercept file requests for mapped images
     renpy.config.file_open_callback = _file_open_callback
 
@@ -48,16 +58,99 @@ def install():
     renpy.display.log.write("renpak: hooks installed")
 
 
+def _init_rt_lib():
+    # type: () -> None
+    """Load librenpak_rt.so for AVIS decoding."""
+    global _rt_lib
+    lib_name = "librenpak_rt.so"
+    # Look next to this file (game/ directory)
+    lib_path = os.path.join(os.path.dirname(__file__), lib_name)
+    try:
+        lib = ctypes.CDLL(lib_path)
+        lib.renpak_decode_frame_png.argtypes = [
+            ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_uint32,
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        lib.renpak_decode_frame_png.restype = ctypes.c_int
+        lib.renpak_free.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+        lib.renpak_free.restype = None
+        _rt_lib = lib
+        renpy.display.log.write("renpak: loaded %s" % lib_path)
+    except Exception as e:
+        renpy.display.log.write("renpak: failed to load %s (%s), AVIS disabled" % (lib_path, e))
+
+
+def _load_avis_bytes(avis_name):
+    # type: (str) -> bytes
+    """Load AVIS container bytes from archive, with caching."""
+    if avis_name in _avis_cache:
+        return _avis_cache[avis_name]
+    f = renpy.loader.load_from_archive(avis_name)
+    data = f.read()
+    f.close()
+    if isinstance(data, memoryview):
+        data = bytes(data)
+    _avis_cache[avis_name] = data
+    return data
+
+
+def _decode_frame_png(avis_data, frame_idx):
+    # type: (bytes, int) -> bytes
+    """Decode a single frame from AVIS data, returning PNG bytes."""
+    if _rt_lib is None:
+        raise RuntimeError("librenpak_rt not loaded")
+
+    buf = ctypes.create_string_buffer(avis_data)
+    out_png = ctypes.POINTER(ctypes.c_uint8)()
+    out_len = ctypes.c_size_t(0)
+
+    ret = _rt_lib.renpak_decode_frame_png(
+        ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8)),
+        len(avis_data),
+        frame_idx,
+        ctypes.byref(out_png),
+        ctypes.byref(out_len),
+    )
+    if ret != 0:
+        raise RuntimeError("renpak_decode_frame_png failed: %d" % ret)
+
+    png_bytes = bytes(
+        ctypes.cast(out_png, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents
+    )
+    _rt_lib.renpak_free(out_png, out_len)
+    return png_bytes
+
+
 def _file_open_callback(name):
     # type: (str) -> object
-    """Redirect requests for original image names to their AVIF versions."""
+    """Redirect requests for original image names to their compressed versions."""
     if name not in _manifest:
         return None
-    avif_name = _manifest[name]
-    try:
-        return renpy.loader.load_from_archive(avif_name)
-    except Exception:
-        return None
+
+    entry = _manifest[name]
+
+    if isinstance(entry, str):
+        # Scatter AVIF path — load from archive and tag as AVIF
+        try:
+            f = renpy.loader.load_from_archive(entry)
+            if f is not None:
+                f._renpak_avif = True
+            return f
+        except Exception:
+            return None
+    elif isinstance(entry, dict) and _rt_lib is not None:
+        # AVIS sequence path
+        try:
+            avis_name = entry["avis"]
+            frame_idx = entry["frame"]
+            avis_data = _load_avis_bytes(avis_name)
+            png_bytes = _decode_frame_png(avis_data, frame_idx)
+            return io.BytesIO(png_bytes)
+        except Exception:
+            return None
+
+    return None
 
 
 def _loadable_callback(name):
@@ -76,15 +169,8 @@ def _patch_load_image():
         return
 
     def _patched_load_image(f, filename, size=None):
-        # Detect AVIF by checking for 'ftyp' box at offset 4
-        try:
-            pos = f.tell()
-            header = f.read(12)
-            f.seek(pos)
-        except Exception:
-            return orig(f, filename, size=size)
-
-        if len(header) >= 8 and header[4:8] == b'ftyp':
+        # Only change the hint for files we tagged in _file_open_callback
+        if getattr(f, '_renpak_avif', False):
             base, _, _ = filename.rpartition('.')
             if base:
                 filename = base + '.avif'

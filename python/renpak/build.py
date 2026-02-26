@@ -1,11 +1,17 @@
 import json
 import shutil
 import time
+from io import BytesIO
 from pathlib import Path
 from collections import defaultdict
 
+from PIL import Image
+
 from renpak.rpa import RpaReader, RpaWriter
-from renpak.encode import is_image, should_encode, encode_avif, get_avif_name
+from renpak.encode import (
+    is_image, should_encode, encode_avif, get_avif_name,
+    group_by_prefix, encode_avis, SEQUENCE_THRESHOLD,
+)
 
 
 def build(game_dir: Path, output_dir: Path, limit: int = 0, quality: int = 50):
@@ -58,20 +64,101 @@ def _build_rpa(rpa_path: Path, output_dir: Path, limit: int, quality: int):
         # Apply limit
         if limit > 0:
             image_names = sorted(images.keys())[:limit]
-            # Images beyond limit go to "others" (kept as-is)
             for name in sorted(images.keys())[limit:]:
                 others[name] = images[name]
             images = {n: images[n] for n in image_names}
             print(f"  Encoding {len(images)} images (limit={limit})")
 
-        manifest = {}  # original_name -> avif_name
+        # Group images by prefix for AVIS sequences
+        seq_groups, ungrouped_names = group_by_prefix(list(images.keys()))
+        seq_count = sum(len(v) for v in seq_groups.values())
+        print(f"  Sequences: {len(seq_groups)} groups ({seq_count} images), Scatter: {len(ungrouped_names)}")
+
+        manifest = {}  # original_name -> avif_name or {"avis": path, "frame": idx}
         original_size = 0
         compressed_size = 0
         encoded_count = 0
 
+        # Check if renpak-core is available for AVIS encoding
+        avis_available = True
+        try:
+            from renpak.encode import _load_core_lib
+            _load_core_lib()
+        except (FileNotFoundError, OSError) as e:
+            avis_available = False
+            print(f"  WARNING: AVIS encoding unavailable ({e}), falling back to AVIF-only")
+            # Move all sequence images back to ungrouped
+            for names in seq_groups.values():
+                ungrouped_names.extend(names)
+            seq_groups = {}
+
         with RpaWriter(out_rpa) as writer:
-            # Process images
-            for i, (name, entry) in enumerate(images.items()):
+            # --- AVIS sequence encoding ---
+            if avis_available:
+                for prefix, names in seq_groups.items():
+                    group_original = 0
+                    frames_rgba = []
+                    group_w, group_h = None, None
+                    fallback = False
+
+                    for name in names:
+                        data = reader.read_file(images[name])
+                        group_original += len(data)
+                        original_size += len(data)
+
+                        try:
+                            img = Image.open(BytesIO(data))
+                            if img.mode != 'RGBA':
+                                img = img.convert('RGBA')
+                            w, h = img.size
+
+                            if group_w is None:
+                                group_w, group_h = w, h
+                            elif (w, h) != (group_w, group_h):
+                                print(f"  AVIS fallback: {prefix}* — resolution mismatch ({w}x{h} vs {group_w}x{group_h})")
+                                fallback = True
+                                break
+
+                            frames_rgba.append((img.tobytes(), w, h))
+                        except Exception as e:
+                            print(f"  AVIS fallback: {prefix}* — decode error: {e}")
+                            fallback = True
+                            break
+
+                    if fallback:
+                        # Fall back to per-image AVIF for this group
+                        ungrouped_names.extend(names)
+                        # Undo the original_size accounting (will be re-added in AVIF loop)
+                        original_size -= group_original
+                        continue
+
+                    # Encode AVIS
+                    try:
+                        avis_data = encode_avis(frames_rgba, quality=quality, speed=6)
+                    except Exception as e:
+                        print(f"  AVIS fallback: {prefix}* — encode error: {e}")
+                        ungrouped_names.extend(names)
+                        original_size -= group_original
+                        continue
+
+                    # Generate AVIS archive path from prefix
+                    safe_prefix = prefix.replace('/', '_').replace(' ', '_').strip('_')
+                    avis_name = f"sequences/{safe_prefix}.avis"
+                    writer.add_file(avis_name, avis_data)
+                    compressed_size += len(avis_data)
+
+                    for frame_idx, name in enumerate(names):
+                        manifest[name] = {"avis": avis_name, "frame": frame_idx}
+                        encoded_count += 1
+
+                    ratio = group_original / len(avis_data) if avis_data else 0
+                    print(f"  [AVIS] {prefix}* ({len(names)} frames) -> {ratio:.1f}x ({group_original} -> {len(avis_data)})")
+
+            # --- Scatter AVIF encoding ---
+            for name in ungrouped_names:
+                if name not in images:
+                    continue
+                entry = images[name]
                 data = reader.read_file(entry)
                 original_size += len(data)
 
@@ -86,8 +173,7 @@ def _build_rpa(rpa_path: Path, output_dir: Path, limit: int, quality: int):
                     ratio = len(data) / len(avif_data) if avif_data else 0
                     print(f"  [{encoded_count}/{len(images)}] {name} -> {ratio:.1f}x ({len(data)} -> {len(avif_data)})")
                 except Exception as e:
-                    # Encoding failed, keep original
-                    print(f"  [{i+1}/{len(images)}] SKIP {name}: {e}")
+                    print(f"  [{encoded_count}/{len(images)}] SKIP {name}: {e}")
                     writer.add_file(name, data)
                     compressed_size += len(data)
 
@@ -124,6 +210,19 @@ def _copy_runtime(output_dir: Path):
             print(f"  Copied {fname} -> {game_dir / fname}")
         else:
             print(f"  WARNING: {src} not found")
+
+    # Copy librenpak_rt.so if available
+    rt_candidates = [
+        Path(__file__).parent.parent.parent / "target" / "release" / "librenpak_rt.so",
+        Path(__file__).parent / "librenpak_rt.so",
+    ]
+    for rt_path in rt_candidates:
+        if rt_path.exists():
+            shutil.copy2(rt_path, game_dir / "librenpak_rt.so")
+            print(f"  Copied librenpak_rt.so -> {game_dir / 'librenpak_rt.so'}")
+            break
+    else:
+        print("  WARNING: librenpak_rt.so not found, AVIS decoding will be unavailable at runtime")
 
 
 def analyze(game_dir: Path):
