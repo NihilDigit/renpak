@@ -64,6 +64,7 @@ def _init_rt_lib():
     # type: () -> None
     """Load librenpak_rt.so for AVIS decoding."""
     global _rt_lib
+    # TODO: support platform-specific runtime library names (.dll/.dylib/.so) for AVIS.
     lib_name = "librenpak_rt.so"
     # Look next to this file (game/ directory)
     lib_path = os.path.join(os.path.dirname(__file__), lib_name)

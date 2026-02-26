@@ -361,18 +361,29 @@ pub fn build(
                 match result {
                     Ok((avif_name, avif, orig_bytes)) => {
                         let comp_bytes = avif.len() as u64;
-                        {
+                        let write_result = {
                             let mut w = writer_mu.lock().unwrap();
-                            let _ = w.add_file(&avif_name, &avif);
-                        }
-                        manifest_mu.lock().unwrap().push((entry.name.clone(), avif_name.clone()));
-                        let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        orig_acc.fetch_add(orig_bytes, Ordering::Relaxed);
-                        comp_acc.fetch_add(comp_bytes, Ordering::Relaxed);
-                        if d % 10 == 0 || d == n_fresh {
-                            progress.task_done(d, n_fresh, &avif_name,
-                                orig_acc.load(Ordering::Relaxed),
-                                comp_acc.load(Ordering::Relaxed));
+                            w.add_file(&avif_name, &avif)
+                                .map_err(|e| format!("write '{}': {e}", avif_name))
+                        };
+
+                        match write_result {
+                            Ok(()) => {
+                                manifest_mu.lock().unwrap().push((entry.name.clone(), avif_name.clone()));
+                                let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                                orig_acc.fetch_add(orig_bytes, Ordering::Relaxed);
+                                comp_acc.fetch_add(comp_bytes, Ordering::Relaxed);
+                                if d % 10 == 0 || d == n_fresh {
+                                    progress.task_done(d, n_fresh, &avif_name,
+                                        orig_acc.load(Ordering::Relaxed),
+                                        comp_acc.load(Ordering::Relaxed));
+                                }
+                            }
+                            Err(msg) => {
+                                err_count.fetch_add(1, Ordering::Relaxed);
+                                let d = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+                                progress.warning(&format!("[{d}/{n_fresh}] {msg}"));
+                            }
                         }
                     }
                     Err(msg) => {
@@ -445,19 +456,14 @@ pub fn build(
 
 // --- Manifest generation ---
 
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn build_manifest_json(entries: &[(String, String)]) -> String {
-    let mut json = String::with_capacity(entries.len() * 80);
-    json.push('{');
-    for (i, (orig, avif)) in entries.iter().enumerate() {
-        if i > 0 { json.push(','); }
-        json.push('\n');
-        json.push_str(&format!("  \"{}\": \"{}\"", json_escape(orig), json_escape(avif)));
+    let mut map = std::collections::BTreeMap::new();
+    for (orig, avif) in entries {
+        map.insert(orig.clone(), avif.clone());
     }
-    json.push_str("\n}\n");
+
+    let mut json = serde_json::to_string_pretty(&map).unwrap_or_else(|_| "{}".to_string());
+    json.push('\n');
     json
 }
 
@@ -491,6 +497,10 @@ pub unsafe extern "C" fn renpak_build(
     workers: i32,
     progress_cb: ProgressCb,
 ) -> i32 {
+    if input_rpa.is_null() || output_rpa.is_null() {
+        return -1;
+    }
+
     let input = match std::ffi::CStr::from_ptr(input_rpa).to_str() {
         Ok(s) => s,
         Err(_) => return -1,

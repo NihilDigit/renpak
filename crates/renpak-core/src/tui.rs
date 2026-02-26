@@ -144,7 +144,7 @@ struct App {
     focus: usize,      // Tab-cycling: 0=Directories, 1=Quality, 2=Performance, 3=Actions
     action_idx: usize, // Left/Right within Actions block
     wants_quit: bool,
-    already_compressed: bool, // RPA already contains AVIF files
+    already_compressed: bool, // RPA contains renpak manifest
 }
 // --- Channel-based progress reporter for build thread ---
 
@@ -171,7 +171,7 @@ impl ProgressReport for ChannelProgress {
 
 // --- Classify RPA entries into directory groups ---
 
-fn classify_dirs(rpa_path: &Path) -> Result<(Vec<DirInfo>, u32, u64, u32, u32), String> {
+fn classify_dirs(rpa_path: &Path) -> Result<(Vec<DirInfo>, u32, u64, u32, u32, bool), String> {
     let mut reader = RpaReader::open(rpa_path).map_err(|e| format!("open RPA: {e}"))?;
     let index = reader.read_index().map_err(|e| format!("read index: {e}"))?;
 
@@ -179,9 +179,15 @@ fn classify_dirs(rpa_path: &Path) -> Result<(Vec<DirInfo>, u32, u64, u32, u32), 
     let mut dir_map: HashMap<String, (u32, u64)> = HashMap::new();
     let mut total_other = 0u32;
     let mut total_avif = 0u32;
+    let mut has_manifest = false;
 
     for entry in index.values() {
         let lower = entry.name.to_ascii_lowercase();
+        if lower == "renpak_manifest.json" {
+            has_manifest = true;
+            total_other += 1;
+            continue;
+        }
         if lower.ends_with(".avif") {
             total_avif += 1;
             total_other += 1;
@@ -272,7 +278,7 @@ fn classify_dirs(rpa_path: &Path) -> Result<(Vec<DirInfo>, u32, u64, u32, u32), 
     let total_images: u32 = dirs.iter().map(|d| d.own_count).sum();
     let total_bytes: u64 = dirs.iter().map(|d| d.own_bytes).sum();
 
-    Ok((dirs, total_images, total_bytes, total_other, total_avif))
+    Ok((dirs, total_images, total_bytes, total_other, total_avif, has_manifest))
 }
 // --- App implementation ---
 
@@ -289,8 +295,8 @@ impl App {
             .ok_or_else(|| format!("No .rpa files in {}", search_dir.display()))?;
 
         let rpa_size = std::fs::metadata(&rpa_path).map(|m| m.len()).unwrap_or(0);
-        let (dirs, _total_images, _, _, total_avif) = classify_dirs(&rpa_path)?;
-        let already_compressed = total_avif > 0;
+        let (dirs, _total_images, _, _, total_avif, has_manifest) = classify_dirs(&rpa_path)?;
+        let already_compressed = has_manifest;
         let max_workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let workers = max_workers; // default: High (all cores)
 
@@ -477,6 +483,9 @@ impl App {
         let game_dir = self.rpa_path.parent().unwrap();
         let backup = game_dir.join(".renpak_backup").join(self.rpa_path.file_name().unwrap());
         if !backup.exists() { return Err("No backup found".into()); }
+        if self.rpa_path.exists() {
+            std::fs::remove_file(&self.rpa_path).map_err(|e| format!("remove current rpa: {e}"))?;
+        }
         std::fs::rename(&backup, &self.rpa_path).map_err(|e| format!("revert: {e}"))?;
         let _ = std::fs::remove_file(game_dir.join("renpak_init.rpy"));
         let _ = std::fs::remove_file(game_dir.join("renpak_loader.py"));
