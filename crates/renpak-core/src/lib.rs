@@ -7,6 +7,7 @@
 
 pub mod rpa;
 pub mod pipeline;
+pub mod tui;
 
 // Re-export for tests
 pub use rpa::{RpaReader, RpaWriter, RpaEntry};

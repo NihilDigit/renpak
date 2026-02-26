@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -8,19 +8,14 @@ use renpak_core::pipeline::{self, ProgressReport};
 
 struct CliProgress {
     start: Instant,
-    phase_start: AtomicU64, // nanos since start, for per-phase ETA
+    phase_start: AtomicU64,
 }
 
 impl CliProgress {
     fn new() -> Self {
-        Self {
-            start: Instant::now(),
-            phase_start: AtomicU64::new(0),
-        }
+        Self { start: Instant::now(), phase_start: AtomicU64::new(0) }
     }
-    fn elapsed(&self) -> f64 {
-        self.start.elapsed().as_secs_f64()
-    }
+    fn elapsed(&self) -> f64 { self.start.elapsed().as_secs_f64() }
     fn phase_elapsed(&self) -> f64 {
         let ps = self.phase_start.load(Ordering::Relaxed);
         self.start.elapsed().as_secs_f64() - (ps as f64 / 1e9)
@@ -34,123 +29,125 @@ impl ProgressReport for CliProgress {
         eprintln!("[{:7.1}s] === {} ===", self.elapsed(), msg);
         let _ = total;
     }
-
     fn task_done(&self, done: u32, total: u32, msg: &str, orig: u64, comp: u64) {
         let pct = if total > 0 { done as f64 / total as f64 * 100.0 } else { 0.0 };
         let pe = self.phase_elapsed();
-        let eta = if done > 0 {
-            let rate = done as f64 / pe;
-            (total - done) as f64 / rate
-        } else { 0.0 };
-
+        let eta = if done > 0 { (total - done) as f64 / (done as f64 / pe) } else { 0.0 };
         if orig > 0 {
-            let orig_mb = orig as f64 / 1_048_576.0;
-            let comp_mb = comp as f64 / 1_048_576.0;
-            let ratio = if orig_mb > 0.0 { comp_mb / orig_mb * 100.0 } else { 0.0 };
+            let (om, cm) = (orig as f64 / 1_048_576.0, comp as f64 / 1_048_576.0);
             eprintln!("  [{:7.1}s] {}/{} ({:.0}%) {:.0}MB->{:.0}MB ({:.0}%) ETA {:.0}s  {}",
-                self.elapsed(), done, total, pct, orig_mb, comp_mb, ratio, eta, msg);
+                self.elapsed(), done, total, pct, om, cm, cm/om*100.0, eta, msg);
         } else {
-            eprintln!("  [{:7.1}s] {}/{} ({:.0}%)  {}",
-                self.elapsed(), done, total, pct, msg);
+            eprintln!("  [{:7.1}s] {}/{} ({:.0}%)  {}", self.elapsed(), done, total, pct, msg);
         }
     }
-
     fn phase_end(&self, _total: u32, msg: &str, orig: u64, comp: u64) {
         if orig > 0 {
-            let orig_mb = orig as f64 / 1_048_576.0;
-            let comp_mb = comp as f64 / 1_048_576.0;
-            eprintln!("[{:7.1}s] === {} ({:.0}MB -> {:.0}MB) ===",
-                self.elapsed(), msg, orig_mb, comp_mb);
+            let (om, cm) = (orig as f64 / 1_048_576.0, comp as f64 / 1_048_576.0);
+            eprintln!("[{:7.1}s] === {} ({:.0}MB -> {:.0}MB) ===", self.elapsed(), msg, om, cm);
         } else {
             eprintln!("[{:7.1}s] === {} ===", self.elapsed(), msg);
         }
     }
-
     fn warning(&self, msg: &str) {
-        eprintln!("  [{:7.1}s] WARN: {}", self.elapsed(), msg);
+        eprintln!("  [WARN] {}", msg);
     }
 }
 
-// --- Argument parsing ---
+// --- CLI argument parsing ---
 
-struct Args {
-    input: PathBuf,
-    output: PathBuf,
-    quality: i32,
-    speed: i32,
-    workers: usize,
-    exclude: Vec<String>,
+enum Command {
+    Tui(PathBuf),
+    Build {
+        input: PathBuf,
+        output: PathBuf,
+        quality: i32,
+        speed: i32,
+        workers: usize,
+        exclude: Vec<String>,
+    },
 }
 
-fn parse_args() -> Result<Args, String> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        return Err(format!(
-            "Usage: {} <input.rpa> <output.rpa> [-q quality] [-s speed] [-j workers] [-x prefix]...",
-            args[0]
-        ));
+fn usage() {
+    eprintln!("Usage:");
+    eprintln!("  renpak <game_dir>                          Interactive TUI");
+    eprintln!("  renpak build <in.rpa> <out.rpa> [options]  Headless build");
+    eprintln!();
+    eprintln!("Build options:");
+    eprintln!("  -q, --quality <N>   AVIF quality 0-63 (default: 60)");
+    eprintln!("  -s, --speed <N>     Encoder speed 0-10 (default: 8)");
+    eprintln!("  -w, --workers <N>   Worker threads (default: auto)");
+    eprintln!("  -x, --exclude <P>   Exclude prefix (repeatable)");
+}
+
+fn parse_args() -> Result<Command, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        usage();
+        return Err("No arguments provided".into());
     }
 
-    let mut a = Args {
-        input: PathBuf::from(&args[1]),
-        output: PathBuf::from(&args[2]),
-        quality: 60,
-        speed: 8,
-        workers: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
-        exclude: Vec::new(),
-    };
-
-    let mut i = 3;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-q" | "--quality" => { i += 1; a.quality = args[i].parse().map_err(|e| format!("-q: {e}"))?; }
-            "-s" | "--speed"   => { i += 1; a.speed = args[i].parse().map_err(|e| format!("-s: {e}"))?; }
-            "-j" | "--workers" => { i += 1; a.workers = args[i].parse().map_err(|e| format!("-j: {e}"))?; }
-            "-x" | "--exclude" => { i += 1; a.exclude.push(args[i].clone()); }
-            other => return Err(format!("unknown flag: {other}")),
+    if args[0] == "build" {
+        if args.len() < 3 {
+            usage();
+            return Err("build requires <input> <output>".into());
         }
-        i += 1;
+        let input = PathBuf::from(&args[1]);
+        let output = PathBuf::from(&args[2]);
+        let mut quality = 60;
+        let mut speed = 8;
+        let mut workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let mut exclude = Vec::new();
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-q" | "--quality" => { i += 1; quality = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(60); }
+                "-s" | "--speed" => { i += 1; speed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(8); }
+                "-w" | "--workers" => { i += 1; workers = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(workers); }
+                "-x" | "--exclude" => { i += 1; if let Some(p) = args.get(i) { exclude.push(p.clone()); } }
+                other => return Err(format!("Unknown option: {other}")),
+            }
+            i += 1;
+        }
+        Ok(Command::Build { input, output, quality, speed, workers, exclude })
+    } else {
+        Ok(Command::Tui(PathBuf::from(&args[0])))
     }
-    Ok(a)
+}
+
+// --- Headless build ---
+
+fn run_headless(input: &Path, output: &Path, quality: i32, speed: i32, workers: usize, exclude: &[String]) {
+    let progress = CliProgress::new();
+    match pipeline::build(input, output, quality, speed, workers, exclude, &progress) {
+        Ok(stats) => {
+            let orig_mb = stats.original_bytes as f64 / 1_048_576.0;
+            let comp_mb = stats.compressed_bytes as f64 / 1_048_576.0;
+            eprintln!("\nDone: {} encoded, {} passthrough, {} errors",
+                stats.encoded, stats.passthrough, stats.encode_errors);
+            eprintln!("Images: {:.0} MB -> {:.0} MB ({:.0}%)", orig_mb, comp_mb,
+                if orig_mb > 0.0 { comp_mb / orig_mb * 100.0 } else { 0.0 });
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn main() {
-    let args = match parse_args() {
-        Ok(a) => a,
-        Err(msg) => { eprintln!("{msg}"); std::process::exit(1); }
-    };
-
-    eprintln!("renpak build");
-    eprintln!("  input:   {}", args.input.display());
-    eprintln!("  output:  {}", args.output.display());
-    eprintln!("  quality: {}, speed: {}, workers: {}", args.quality, args.speed, args.workers);
-    if !args.exclude.is_empty() {
-        eprintln!("  exclude: {:?}", args.exclude);
-    }
-    eprintln!();
-
-    // Ensure output directory exists
-    if let Some(parent) = args.output.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let progress = CliProgress::new();
-    match pipeline::build(&args.input, &args.output, args.quality, args.speed, args.workers, &args.exclude, &progress) {
-        Ok(stats) => {
-            let in_mb = std::fs::metadata(&args.input).map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
-            let out_mb = std::fs::metadata(&args.output).map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
-            eprintln!();
-            eprintln!("Done in {:.0}s", progress.elapsed());
-            eprintln!("  RPA: {:.0}MB -> {:.0}MB ({:.0}%)", in_mb, out_mb, out_mb / in_mb * 100.0);
-            eprintln!("  Images: {:.0}MB -> {:.0}MB ({:.0}%)",
-                stats.original_bytes as f64 / 1_048_576.0,
-                stats.compressed_bytes as f64 / 1_048_576.0,
-                stats.compressed_bytes as f64 / stats.original_bytes as f64 * 100.0);
-            eprintln!("  {} encoded, {} passthrough, {} errors",
-                stats.encoded, stats.passthrough, stats.encode_errors);
+    match parse_args() {
+        Ok(Command::Tui(game_dir)) => {
+            if let Err(e) = renpak_core::tui::run(&game_dir) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
-        Err(msg) => {
-            eprintln!("FATAL: {msg}");
+        Ok(Command::Build { input, output, quality, speed, workers, exclude }) => {
+            run_headless(&input, &output, quality, speed, workers, &exclude);
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
             std::process::exit(1);
         }
     }

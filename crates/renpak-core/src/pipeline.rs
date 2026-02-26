@@ -64,10 +64,10 @@ impl ProgressReport for NoProgress {
 
 // --- Classification ---
 
-const IMAGE_EXTS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".bmp"];
-const DEFAULT_SKIP_PREFIXES: &[&str] = &["gui/"];
+pub const IMAGE_EXTS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".bmp"];
+pub const DEFAULT_SKIP_PREFIXES: &[&str] = &["gui/"];
 
-fn should_encode(name: &str, skip_prefixes: &[String]) -> bool {
+pub fn should_encode(name: &str, skip_prefixes: &[String]) -> bool {
     let lower = name.to_ascii_lowercase();
     let is_img = IMAGE_EXTS.iter().any(|e| lower.ends_with(e));
     let skip = skip_prefixes.iter().any(|p| lower.starts_with(p.as_str()));
