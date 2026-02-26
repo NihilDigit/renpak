@@ -8,6 +8,10 @@ fn main() {
         .probe("libavif")
         .is_ok()
     {
+        // libavif's .pc may not list rav1e in Libs.private, so link it explicitly
+        if statik {
+            let _ = pkg_config::Config::new().statik(true).probe("rav1e");
+        }
         return;
     }
 
@@ -19,8 +23,8 @@ fn main() {
             // rav1e static lib
             if let Ok(rav1e) = std::env::var("RAV1E_PREFIX") {
                 println!("cargo:rustc-link-search=native={rav1e}/lib");
-                println!("cargo:rustc-link-lib=static=rav1e");
             }
+            println!("cargo:rustc-link-lib=static=rav1e");
             // Windows system libs needed for static linking
             if cfg!(target_os = "windows") {
                 println!("cargo:rustc-link-lib=ws2_32");
