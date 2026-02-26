@@ -1,6 +1,6 @@
 # renpak
 
-AVIF compression toolchain for Ren'Py games (targeting HS2/Koikatsu-style 3D-rendered visual novels).
+AVIF compression toolchain for Ren'Py games.
 Rust CLI with interactive TUI + runtime Ren'Py plugin.
 
 License: MPL-2.0
@@ -37,7 +37,7 @@ RENPAK_STATIC=1 cargo build --release
 
 ### Encoding Constraints
 
-- AVIF color space: must explicitly set CICP (primaries=1, transfer=13, matrix=1, range=full) — HS2 renders will color-shift otherwise
+- AVIF color space: must explicitly set CICP (primaries=1, transfer=13, matrix=1, range=full) to avoid color shifts
 - Resolution: pad to multiple of 8 before encoding, crop back after decoding (Ren'Py Issue #5061)
 - AVIS GOP: star pattern (frame 0 = I-frame, rest = P-frames referencing frame 0) for O(1) random access
 - Video re-encoding keeps .webm container — Ren'Py's ffmpeg auto-detects AV1 codec, no runtime hooks needed
@@ -54,8 +54,8 @@ Runtime integrates via Ren'Py hooks without engine modifications:
 
 Runtime .so/.dll/.dylib must be pre-built for each target:
 - Linux x86_64 / aarch64
-- Windows x86_64
-- macOS x86_64 / aarch64
+- Windows x86_64 / aarch64
+- macOS aarch64
 
 CI builds static binaries via GitHub Actions (tag `v*` to trigger).
 
