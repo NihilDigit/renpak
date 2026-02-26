@@ -1,29 +1,25 @@
 # renpak
 
 Ren'Py 游戏资产压缩工具链，面向 HS2/Koikatsu 等 3D 渲染视觉小说。
-构建期 CLI (Python + Rust) + 运行时 Ren'Py 插件 (Python + Rust cdylib)。
+Rust CLI + 运行时 Ren'Py 插件 (Python + Rust cdylib)。
 
 许可证：MPL-2.0
 
 ## 架构
 
-两个 Rust crate + 一个 Python 包：
+两个 Rust crate + 运行时插件：
 
-- `crates/renpak-core/` — 构建期核心：RPA 读写、AVIF/AVIS 编码、场景分析
+- `crates/renpak-core/` — 构建期核心：RPA 读写、AVIF/AVIS 编码、并行管线、CLI
 - `crates/renpak-rt/` — 运行时解码器：AVIS 帧级随机访问，导出 extern "C" API 供 ctypes 调用
-- `python/renpak/` — CLI 编排层，调用 Rust 库完成构建流程
 - `python/runtime/` — 部署到游戏 `game/` 目录的运行时插件 (.rpy + .py)
+- `install.sh` — 一键压缩 + 部署脚本
 
 详细设计见 `docs/PLAN.md`。
 
 ## 构建
 
 ```bash
-# Rust crates
 cargo build --release
-
-# Python CLI (用 uv，禁止 pip install)
-uv run python -m renpak --help
 ```
 
 ## 技术约束
@@ -66,27 +62,23 @@ uv run python -m renpak --help
 - 错误处理：核心库用 `Result<T, renpak_core::Error>`；FFI 边界用返回码 (0=成功, 负数=错误)
 - FFI 内存：Rust 分配的 buffer 必须通过 `renpak_free_buffer` 释放，不能让 Python 侧 free
 
-### Python
+### Python（仅运行时插件）
 
-- 用 uv 管理依赖，禁止 pip install / 全局安装
-- 运行时代码 (runtime/) 必须兼容 Python 3.9，不能用 3.10+ 语法 (match/case, type union X|Y 等)
-- CLI 代码 (python/renpak/) 可以用更高版本特性
+- 运行时代码 (python/runtime/) 必须兼容 Python 3.9，不能用 3.10+ 语法 (match/case, type union X|Y 等)
+- 不能依赖任何第三方包，只能用标准库 + Ren'Py 自带模块
 
 ### 测试
 
 - Rust: `cargo test`
-- Python: `uv run pytest`
-- 端到端: `tests/test_roundtrip.py` — 原图 → 编码 → 解码 → 比对尺寸和像素差异
+- 端到端: `tests/` 目录
 
 ## 常用命令
 
 ```bash
-cargo build --release                    # 构建 Rust
-cargo test                               # Rust 测试
-uv run python -m renpak build game/      # 完整构建流程
-uv run python -m renpak analyze game/    # 仅分析资产
-uv run python -m renpak verify output/   # 验证压缩结果
-uv run pytest                            # Python 测试
+cargo build --release                                    # 构建
+cargo test                                               # 测试
+./target/release/renpak input.rpa output.rpa -q 60       # 压缩 RPA
+./install.sh /path/to/game                               # 一键安装
 ```
 
 ## 不要做的事

@@ -65,12 +65,12 @@ impl ProgressReport for NoProgress {
 // --- Classification ---
 
 const IMAGE_EXTS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".bmp"];
-const SKIP_PREFIXES: &[&str] = &["gui/"];
+const DEFAULT_SKIP_PREFIXES: &[&str] = &["gui/"];
 
-fn should_encode(name: &str) -> bool {
+fn should_encode(name: &str, skip_prefixes: &[String]) -> bool {
     let lower = name.to_ascii_lowercase();
     let is_img = IMAGE_EXTS.iter().any(|e| lower.ends_with(e));
-    let skip = SKIP_PREFIXES.iter().any(|p| lower.starts_with(p));
+    let skip = skip_prefixes.iter().any(|p| lower.starts_with(p.as_str()));
     is_img && !skip
 }
 
@@ -133,20 +133,25 @@ pub fn build(
     quality: i32,
     speed: i32,
     workers: usize,
+    exclude: &[String],
     progress: &dyn ProgressReport,
 ) -> Result<BuildStats, String> {
-    // 1. Read source index
+    // 1. Build skip prefixes: defaults + user excludes
+    let mut skip_prefixes: Vec<String> = DEFAULT_SKIP_PREFIXES.iter().map(|s| s.to_string()).collect();
+    skip_prefixes.extend(exclude.iter().cloned());
+
+    // 2. Read source index
     let mut reader = RpaReader::open(input_path)
         .map_err(|e| format!("open RPA: {e}"))?;
     let index = reader.read_index()
         .map_err(|e| format!("read index: {e}"))?;
     let src_key = reader.key();
 
-    // 2. Classify entries
+    // 3. Classify entries
     let mut to_encode: Vec<&RpaEntry> = Vec::new();
     let mut to_passthrough: Vec<&RpaEntry> = Vec::new();
     for entry in index.values() {
-        if should_encode(&entry.name) {
+        if should_encode(&entry.name, &skip_prefixes) {
             to_encode.push(entry);
         } else {
             to_passthrough.push(entry);
@@ -156,7 +161,7 @@ pub fn build(
     let n_encode = to_encode.len() as u32;
     let n_pass = to_passthrough.len() as u32;
 
-    // 3. Create output RPA and write passthrough entries first
+    // 4. Create output RPA and write passthrough entries first
     let mut writer = RpaWriter::create(output_path, src_key)
         .map_err(|e| format!("create output RPA: {e}"))?;
 
@@ -175,7 +180,7 @@ pub fn build(
     }
     progress.phase_end(n_pass, "Passthrough done", 0, 0);
 
-    // 4. Parallel encode → write immediately via Mutex<RpaWriter>
+    // 5. Parallel encode → write immediately via Mutex<RpaWriter>
     progress.phase_start(n_encode,
         &format!("Encoding {} images (quality={}, speed={}, workers={})",
                  n_encode, quality, speed, workers));
@@ -241,7 +246,7 @@ pub fn build(
 
     progress.phase_end(n_encode, "Encoding done", orig_total, comp_total);
 
-    // 5. Write manifest into RPA
+    // 6. Write manifest into RPA
     progress.phase_start(1, "Writing manifest");
     let manifest_entries = manifest.into_inner().unwrap();
     let manifest_json = build_manifest_json(&manifest_entries);
@@ -252,7 +257,7 @@ pub fn build(
     }
     progress.phase_end(1, "Manifest written", orig_total, comp_total);
 
-    // 6. Finalize RPA (write index)
+    // 7. Finalize RPA (write index)
     progress.phase_start(1, "Finalizing RPA index");
     let writer = writer_mu.into_inner().unwrap();
     writer.finish().map_err(|e| format!("finalize RPA: {e}"))?;
@@ -332,7 +337,8 @@ pub unsafe extern "C" fn renpak_build(
         workers as usize
     };
     let prog = CbProgress(progress_cb);
-    match build(Path::new(input), Path::new(output), quality, speed, w, &prog) {
+    let no_exclude: Vec<String> = Vec::new();
+    match build(Path::new(input), Path::new(output), quality, speed, w, &no_exclude, &prog) {
         Ok(_) => 0,
         Err(_) => -1,
     }

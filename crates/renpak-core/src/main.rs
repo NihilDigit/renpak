@@ -79,13 +79,14 @@ struct Args {
     quality: i32,
     speed: i32,
     workers: usize,
+    exclude: Vec<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         return Err(format!(
-            "Usage: {} <input.rpa> <output.rpa> [-q quality] [-s speed] [-j workers]",
+            "Usage: {} <input.rpa> <output.rpa> [-q quality] [-s speed] [-j workers] [-x prefix]...",
             args[0]
         ));
     }
@@ -96,6 +97,7 @@ fn parse_args() -> Result<Args, String> {
         quality: 60,
         speed: 8,
         workers: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+        exclude: Vec::new(),
     };
 
     let mut i = 3;
@@ -104,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
             "-q" | "--quality" => { i += 1; a.quality = args[i].parse().map_err(|e| format!("-q: {e}"))?; }
             "-s" | "--speed"   => { i += 1; a.speed = args[i].parse().map_err(|e| format!("-s: {e}"))?; }
             "-j" | "--workers" => { i += 1; a.workers = args[i].parse().map_err(|e| format!("-j: {e}"))?; }
+            "-x" | "--exclude" => { i += 1; a.exclude.push(args[i].clone()); }
             other => return Err(format!("unknown flag: {other}")),
         }
         i += 1;
@@ -121,6 +124,9 @@ fn main() {
     eprintln!("  input:   {}", args.input.display());
     eprintln!("  output:  {}", args.output.display());
     eprintln!("  quality: {}, speed: {}, workers: {}", args.quality, args.speed, args.workers);
+    if !args.exclude.is_empty() {
+        eprintln!("  exclude: {:?}", args.exclude);
+    }
     eprintln!();
 
     // Ensure output directory exists
@@ -129,7 +135,7 @@ fn main() {
     }
 
     let progress = CliProgress::new();
-    match pipeline::build(&args.input, &args.output, args.quality, args.speed, args.workers, &progress) {
+    match pipeline::build(&args.input, &args.output, args.quality, args.speed, args.workers, &args.exclude, &progress) {
         Ok(stats) => {
             let in_mb = std::fs::metadata(&args.input).map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
             let out_mb = std::fs::metadata(&args.output).map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
