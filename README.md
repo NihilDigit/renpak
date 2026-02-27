@@ -2,7 +2,7 @@
 
 AVIF compression toolchain for Ren'Py games. Shrinks RPA archives by re-encoding images to AVIF — games load them transparently at runtime, no engine patches needed.
 
-https://github.com/user-attachments/assets/4e3fc5af-d552-4986-9b04-1777a481e185
+https://github.com/user-attachments/assets/46800098-0db3-4de7-a442-b2dbd0fb5fb1
 
 ## Why bother
 
