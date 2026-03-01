@@ -1,10 +1,8 @@
 """renpak runtime loader — hooks into Ren'Py to serve AVIF-compressed images.
 
-This module runs inside Ren'Py's embedded Python 3.9.
-No third-party dependencies. No 3.10+ syntax.
+This module runs inside Ren'Py's embedded Python (2.7 for Ren'Py 7.x, 3.9 for 8.x).
+No third-party dependencies. No 3.10+ syntax. No Python 3-only constructs.
 """
-
-from __future__ import annotations
 
 import json
 import os

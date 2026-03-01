@@ -30,7 +30,7 @@ RENPAK_STATIC=1 cargo build --release
 
 ### Ren'Py Runtime Environment
 
-- Runtime plugin runs on Ren'Py's bundled Python 3.9.10 (CPython), not system Python
+- Runtime plugin runs on Ren'Py's bundled Python (2.7 for Ren'Py 7.x, 3.9 for 8.x), not system Python
 - Native libraries loaded via ctypes.CDLL — must export pure C ABI (extern "C"), no PyO3
 - Runtime Python code cannot depend on any third-party packages — stdlib + Ren'Py builtins only
 - Ren'Py's image preloader runs on background threads — Rust decoder must be thread-safe (per-thread context, no global state)
@@ -70,7 +70,7 @@ CI builds static binaries via GitHub Actions (tag `v*` to trigger).
 
 ### Python (runtime plugin only)
 
-- Must be compatible with Python 3.9 — no 3.10+ syntax (match/case, type union X|Y, etc.)
+- Must be compatible with Python 2.7+ (Ren'Py 7.x) and 3.9 (Ren'Py 8.x) — no `from __future__ import annotations`, no 3.x-only syntax, no 3.10+ syntax (match/case, type union X|Y, etc.)
 - No third-party dependencies — stdlib + Ren'Py builtins only
 
 ## Common Commands
