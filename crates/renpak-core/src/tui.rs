@@ -121,6 +121,9 @@ struct ClickRegions {
 
 struct App {
     game_dir: PathBuf,
+    /// Ren'Py basedir: the directory containing the launcher (.exe/.sh/.py).
+    /// Always the parent of game/, renpy/, lib/.
+    basedir: PathBuf,
     rpa_path: PathBuf,
     rpa_size: u64,
     dirs: Vec<DirInfo>,
@@ -285,7 +288,8 @@ fn classify_dirs(rpa_path: &Path) -> Result<(Vec<DirInfo>, u32, u64, u32, u32, b
 impl App {
     fn new(game_dir: &Path) -> Result<Self, String> {
         let game_sub = game_dir.join("game");
-        let search_dir = if game_sub.is_dir() { &game_sub } else { game_dir };
+        let has_game_sub = game_sub.is_dir();
+        let search_dir = if has_game_sub { &game_sub } else { game_dir };
 
         let rpa_path = std::fs::read_dir(search_dir)
             .map_err(|e| format!("read dir: {e}"))?
@@ -293,6 +297,16 @@ impl App {
             .find(|e| e.path().extension().is_some_and(|ext| ext == "rpa"))
             .map(|e| e.path())
             .ok_or_else(|| format!("No .rpa files in {}", search_dir.display()))?;
+
+        // Ren'Py basedir: the directory containing the launcher executable.
+        // When game_dir has a game/ subdirectory, game_dir IS the basedir.
+        // Otherwise the user pointed at the game/ directory directly, so
+        // the basedir is one level up.
+        let basedir = if has_game_sub {
+            game_dir.to_path_buf()
+        } else {
+            game_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| game_dir.to_path_buf())
+        };
 
         let rpa_size = std::fs::metadata(&rpa_path).map(|m| m.len()).unwrap_or(0);
         let (dirs, _total_images, _, _, total_avif, has_manifest) = classify_dirs(&rpa_path)?;
@@ -308,7 +322,7 @@ impl App {
         let visible: Vec<usize> = (0..dirs.len()).collect(); // will be refreshed below
 
         let mut app = App {
-            game_dir: game_dir.to_path_buf(), rpa_path, rpa_size, dirs, visible,
+            game_dir: game_dir.to_path_buf(), basedir, rpa_path, rpa_size, dirs, visible,
             selected: 0, scroll_offset: 0, dir_visible_h: 10, preset: QualityPreset::Medium, workers, max_workers,
             phase: Phase::Analyze,
             progress: BuildProgress {
@@ -449,7 +463,8 @@ impl App {
     }
 
     fn launch_game(&self) -> Result<(), String> {
-        let entries: Vec<_> = std::fs::read_dir(&self.game_dir)
+        // Ren'Py launchers live in basedir (the parent of game/, renpy/, lib/).
+        let entries: Vec<_> = std::fs::read_dir(&self.basedir)
             .map_err(|e| format!("read dir: {e}"))?
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -467,10 +482,10 @@ impl App {
 
         let launcher = priority.iter()
             .find_map(|ext| entries.iter().find(|p| p.to_string_lossy().ends_with(ext)))
-            .ok_or_else(|| "No launcher found (.sh/.exe/.py)".to_string())?;
+            .ok_or_else(|| format!("No launcher found in {}", self.basedir.display()))?;
 
         std::process::Command::new(launcher)
-            .current_dir(&self.game_dir)
+            .current_dir(&self.basedir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
