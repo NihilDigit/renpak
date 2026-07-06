@@ -36,7 +36,7 @@ extern "C" {
 }
 
 // avifDecoder field offsets (libavif 1.3.0, x86_64)
-const DEC_IMAGE: usize = 48;      // avifImage* image
+const DEC_IMAGE: usize = 48; // avifImage* image
 const DEC_IMAGE_INDEX: usize = 56; // int imageIndex
 const DEC_IMAGE_COUNT: usize = 60; // int imageCount
 
@@ -78,6 +78,13 @@ fn rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, png::Enc
 }
 
 /// Decode a specific frame from AVIS bytes and return PNG bytes.
+///
+/// # Safety
+///
+/// `avis_data` must point to `avis_len` readable bytes for the duration of
+/// this call. `out_png` and `out_png_len` must be valid writable pointers.
+/// On success, the returned buffer must be released with `renpak_free` using
+/// the exact length written to `out_png_len`.
 #[no_mangle]
 pub unsafe extern "C" fn renpak_decode_frame_png(
     avis_data: *const u8,
@@ -194,6 +201,11 @@ pub unsafe extern "C" fn renpak_decode_frame_png(
 }
 
 /// Query AVIS frame count and dimensions.
+///
+/// # Safety
+///
+/// `avis_data` must point to `avis_len` readable bytes for the duration of
+/// this call. Any non-null output pointer must be valid and writable.
 #[no_mangle]
 pub unsafe extern "C" fn renpak_avis_info(
     avis_data: *const u8,
@@ -224,7 +236,7 @@ pub unsafe extern "C" fn renpak_avis_info(
     }
 
     let dec = decoder as *const u8;
-    let image = read_ptr(dec, DEC_IMAGE) as *const u8;
+    let image = read_ptr(dec, DEC_IMAGE);
 
     if !out_frame_count.is_null() {
         *out_frame_count = read_i32(dec, DEC_IMAGE_COUNT) as u32;
@@ -241,6 +253,12 @@ pub unsafe extern "C" fn renpak_avis_info(
 }
 
 /// Free a buffer allocated by renpak functions.
+///
+/// # Safety
+///
+/// `ptr` and `len` must exactly match a buffer returned by a renpak FFI
+/// function. Passing any other pointer, or a mismatched length, is undefined
+/// behavior.
 #[no_mangle]
 pub unsafe extern "C" fn renpak_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {

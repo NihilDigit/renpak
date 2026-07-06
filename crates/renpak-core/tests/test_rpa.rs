@@ -14,11 +14,22 @@ fn test_read_real_rpa_index() {
     let index = reader.read_index().expect("parse index");
 
     eprintln!("Entries: {}", index.len());
-    assert!(index.len() > 10000, "expected >10000 entries, got {}", index.len());
+    assert!(
+        index.len() > 10000,
+        "expected >10000 entries, got {}",
+        index.len()
+    );
 
     // Spot-check known files
-    let ale1 = index.get("images/01/ale 1.jpg").expect("ale 1.jpg not found");
-    eprintln!("ale 1.jpg: offset={}, length={}, prefix_len={}", ale1.offset, ale1.length, ale1.prefix.len());
+    let ale1 = index
+        .get("images/01/ale 1.jpg")
+        .expect("ale 1.jpg not found");
+    eprintln!(
+        "ale 1.jpg: offset={}, length={}, prefix_len={}",
+        ale1.offset,
+        ale1.length,
+        ale1.prefix.len()
+    );
     assert!(ale1.length > 0);
     assert!(ale1.length < 10_000_000); // should be a few hundred KB
 
@@ -29,11 +40,9 @@ fn test_read_real_rpa_index() {
     assert_eq!(&data[..2], &[0xFF, 0xD8], "not a JPEG");
 
     // Print a few more entries
-    let mut count = 0;
-    for (name, entry) in index.iter() {
+    for (count, (name, entry)) in index.iter().enumerate() {
         if count < 5 {
             eprintln!("  {}: offset={}, len={}", name, entry.offset, entry.length);
         }
-        count += 1;
     }
 }

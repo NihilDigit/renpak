@@ -5,12 +5,14 @@
 
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
-pub mod rpa;
+pub mod manifest;
 pub mod pipeline;
+pub mod rpa;
 pub mod tui;
+pub mod vp9;
 
 // Re-export for tests
-pub use rpa::{RpaReader, RpaWriter, RpaEntry};
+pub use rpa::{RpaEntry, RpaReader, RpaWriter};
 
 use std::os::raw::c_int;
 
@@ -41,7 +43,10 @@ extern "C" {
     fn avifEncoderCreate() -> *mut avifEncoder;
     fn avifEncoderDestroy(encoder: *mut avifEncoder);
     fn avifEncoderAddImage(
-        enc: *mut avifEncoder, img: *const avifImage, dur: u64, flags: u32,
+        enc: *mut avifEncoder,
+        img: *const avifImage,
+        dur: u64,
+        flags: u32,
     ) -> avifResult;
     fn avifEncoderFinish(enc: *mut avifEncoder, out: *mut avifRWData) -> avifResult;
     fn avifRWDataFree(raw: *mut avifRWData);
@@ -86,11 +91,23 @@ const RGB_ROW_BYTES: usize = 56;
 /// Encode a single RGBA image to AVIF. Returns AVIF bytes.
 ///
 /// This is the Rust-native API (not FFI). Used by the build pipeline.
+///
+/// # Safety
+///
+/// Calls into libavif through raw FFI offsets. `rgba` must contain at least
+/// `width * height * 4` bytes of RGBA pixels and remain valid for the duration
+/// of the call.
 pub unsafe fn encode_avif_raw(
-    rgba: &[u8], width: u32, height: u32, quality: i32, speed: i32,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: i32,
+    speed: i32,
 ) -> Result<Vec<u8>, i32> {
     let encoder = avifEncoderCreate();
-    if encoder.is_null() { return Err(-2); }
+    if encoder.is_null() {
+        return Err(-2);
+    }
     let enc = encoder as *mut u8;
 
     write_i32(enc, ENC_MAX_THREADS, 1);
@@ -101,7 +118,10 @@ pub unsafe fn encode_avif_raw(
     write_i32(enc, ENC_QUALITY_ALPHA, quality.clamp(0, 100));
 
     let image = avifImageCreate(width, height, 8, AVIF_PIXEL_FORMAT_YUV444);
-    if image.is_null() { avifEncoderDestroy(encoder); return Err(-4); }
+    if image.is_null() {
+        avifEncoderDestroy(encoder);
+        return Err(-4);
+    }
     let img = image as *mut u8;
 
     write_i32(img, IMG_YUV_RANGE, AVIF_RANGE_FULL);
@@ -126,12 +146,21 @@ pub unsafe fn encode_avif_raw(
 
     let r = avifEncoderAddImage(encoder, image, 1, AVIF_ADD_IMAGE_FLAG_NONE);
     avifImageDestroy(image);
-    if r != AVIF_RESULT_OK { avifEncoderDestroy(encoder); return Err(-6); }
+    if r != AVIF_RESULT_OK {
+        avifEncoderDestroy(encoder);
+        return Err(-6);
+    }
 
-    let mut output = avifRWData { data: std::ptr::null_mut(), size: 0 };
+    let mut output = avifRWData {
+        data: std::ptr::null_mut(),
+        size: 0,
+    };
     let r = avifEncoderFinish(encoder, &mut output);
     avifEncoderDestroy(encoder);
-    if r != AVIF_RESULT_OK { avifRWDataFree(&mut output); return Err(-7); }
+    if r != AVIF_RESULT_OK {
+        avifRWDataFree(&mut output);
+        return Err(-7);
+    }
 
     let result = std::slice::from_raw_parts(output.data, output.size).to_vec();
     avifRWDataFree(&mut output);
@@ -139,6 +168,11 @@ pub unsafe fn encode_avif_raw(
 }
 
 /// Encode RGBA frames into AVIS (streaming: one frame at a time).
+///
+/// # Safety
+///
+/// Calls into libavif through raw FFI offsets. Each frame yielded by `frames`
+/// must contain at least `width * height * 4` bytes matching its dimensions.
 pub unsafe fn encode_avis_streaming(
     frames: impl Iterator<Item = (Vec<u8>, u32, u32)>,
     frame_count: u32,
@@ -146,7 +180,9 @@ pub unsafe fn encode_avis_streaming(
     speed: i32,
 ) -> Result<Vec<u8>, i32> {
     let encoder = avifEncoderCreate();
-    if encoder.is_null() { return Err(-2); }
+    if encoder.is_null() {
+        return Err(-2);
+    }
     let enc = encoder as *mut u8;
 
     write_i32(enc, ENC_MAX_THREADS, 1);
@@ -156,11 +192,17 @@ pub unsafe fn encode_avis_streaming(
     write_i32(enc, ENC_QUALITY, quality.clamp(0, 100));
     write_i32(enc, ENC_QUALITY_ALPHA, quality.clamp(0, 100));
 
-    let mut output = avifRWData { data: std::ptr::null_mut(), size: 0 };
+    let mut output = avifRWData {
+        data: std::ptr::null_mut(),
+        size: 0,
+    };
 
     for (rgba, width, height) in frames {
         let image = avifImageCreate(width, height, 8, AVIF_PIXEL_FORMAT_YUV444);
-        if image.is_null() { avifEncoderDestroy(encoder); return Err(-4); }
+        if image.is_null() {
+            avifEncoderDestroy(encoder);
+            return Err(-4);
+        }
         let img = image as *mut u8;
 
         write_i32(img, IMG_YUV_RANGE, AVIF_RANGE_FULL);
@@ -185,13 +227,19 @@ pub unsafe fn encode_avis_streaming(
 
         let r = avifEncoderAddImage(encoder, image, 1, AVIF_ADD_IMAGE_FLAG_NONE);
         avifImageDestroy(image);
-        if r != AVIF_RESULT_OK { avifEncoderDestroy(encoder); return Err(-6); }
+        if r != AVIF_RESULT_OK {
+            avifEncoderDestroy(encoder);
+            return Err(-6);
+        }
         // rgba is dropped here — memory freed immediately
     }
 
     let r = avifEncoderFinish(encoder, &mut output);
     avifEncoderDestroy(encoder);
-    if r != AVIF_RESULT_OK { avifRWDataFree(&mut output); return Err(-7); }
+    if r != AVIF_RESULT_OK {
+        avifRWDataFree(&mut output);
+        return Err(-7);
+    }
 
     let result = std::slice::from_raw_parts(output.data, output.size).to_vec();
     avifRWDataFree(&mut output);
@@ -200,11 +248,25 @@ pub unsafe fn encode_avis_streaming(
 
 // --- Legacy FFI (kept for backward compat with Python ctypes) ---
 
+/// Encode same-sized RGBA frames into AVIS bytes.
+///
+/// # Safety
+///
+/// `frames_rgba` must point to `frame_count` readable frame pointers. Each
+/// frame pointer must reference `width * height * 4` readable bytes for the
+/// duration of the call. `out_data` and `out_len` must be valid writable
+/// pointers. On success, release the returned buffer with `renpak_free` using
+/// the exact returned length.
 #[no_mangle]
 pub unsafe extern "C" fn renpak_encode_avis(
-    frames_rgba: *const *const u8, frame_count: u32,
-    width: u32, height: u32, quality: i32, speed: i32,
-    out_data: *mut *mut u8, out_len: *mut usize,
+    frames_rgba: *const *const u8,
+    frame_count: u32,
+    width: u32,
+    height: u32,
+    quality: i32,
+    speed: i32,
+    out_data: *mut *mut u8,
+    out_len: *mut usize,
 ) -> i32 {
     if frames_rgba.is_null() || frame_count == 0 || out_data.is_null() || out_len.is_null() {
         return -1;
@@ -222,7 +284,9 @@ pub unsafe extern "C" fn renpak_encode_avis(
             let len = data.len();
             let layout = std::alloc::Layout::from_size_align(len, 1).unwrap();
             let buf = std::alloc::alloc(layout);
-            if buf.is_null() { return -8; }
+            if buf.is_null() {
+                return -8;
+            }
             std::ptr::copy_nonoverlapping(data.as_ptr(), buf, len);
             *out_data = buf;
             *out_len = len;
@@ -232,6 +296,13 @@ pub unsafe extern "C" fn renpak_encode_avis(
     }
 }
 
+/// Free a buffer allocated by renpak FFI functions.
+///
+/// # Safety
+///
+/// `ptr` and `len` must exactly match a buffer returned by a renpak FFI
+/// function. Passing any other pointer, or a mismatched length, is undefined
+/// behavior.
 #[no_mangle]
 pub unsafe extern "C" fn renpak_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {

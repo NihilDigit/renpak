@@ -105,6 +105,142 @@ renpak build input.rpa output.rpa [options]
 | `-w, --workers` | Thread count (default: all cores) |
 | `-x, --exclude` | Skip files matching prefix (repeatable) |
 
+### Experimental VP9 Android path
+
+The v2 MVP path bundles related image frames into VP9/WebM files, re-encodes
+video outliers for mobile, and stores a v2 manifest that maps original asset
+names to optimized targets. This path is currently CLI-first and intended for
+Android packaging experiments. Image bundles currently keep source resolution
+and record the `source-resolution` profile; mobile downscale image profiles need
+runtime/display handling before they should be enabled.
+
+Build a strip archive that can actually shrink:
+
+```bash
+renpak build-vp9 input.rpa output.rpa \
+  --limit 64 \
+  --bundle-size 8 \
+  --strip-optimized \
+  --work-dir /mnt/data/renpak-work \
+  --android-assets-dir /mnt/data/renpak-android-assets
+```
+
+Plan candidate scale before encoding:
+
+```bash
+renpak plan-vp9 input.rpa \
+  --bundle-size 8 \
+  --json
+```
+
+`plan-vp9` scans the RPA and estimates selected frame count, original bytes, dimension groups, and planned bundle count before the output-size guard. It uses the same candidate ordering as `build-vp9`, so `--limit` estimates match the frames that the build command will try first. The default fast mode reads image headers only, so it is suitable for full-corpus planning but cannot prove transparency exclusions. Pass `--exact` to decode candidate images and make transparency/decode behavior match `build-vp9`.
+
+Useful flags:
+
+| Flag | Description |
+|------|-------------|
+| `--limit` | Maximum number of image frames to process. Omit for all candidates. |
+| `--video-limit` | Maximum number of video files to re-encode. Omit for all videos. |
+| `--no-video` | Disable mobile video re-encoding for this build. |
+| `--bundle-size` | Maximum frames per WebM bundle, clamped to 1-32. |
+| `--min-width`, `--min-height` | Skip small UI-like images. Defaults are 640x360. |
+| `--allow-transparent` | Include transparent images. Transparent images are skipped by default. |
+| `--min-savings-percent` | Keep a bundle only if it saves at least this much. Default is 8. |
+| `--strip-optimized` | Remove original files accepted into the manifest. This is required for archive size reduction. |
+| `--android-assets-dir` | Also write loose `renpak_manifest.json` and `renpak/bundles/*.webm` assets for Android packaging experiments. |
+| `--json` | Emit machine-readable `plan-vp9` output. |
+| `--exact` | Decode candidate images during `plan-vp9` so transparent images are skipped exactly like `build-vp9`. |
+
+Verify a generated archive before packaging:
+
+```bash
+python3 scripts/verify_vp9_archive.py output.rpa \
+  --android-assets-dir /mnt/data/renpak-android-assets \
+  --expect-stripped
+```
+
+The mobile video profile keeps frame rate, caps height at 720p without
+upscaling, encodes VP9/WebM with realtime settings (`crf=38`, `cpu-used=8`,
+`row-mt=1`, `pix_fmt=yuv420p`), copies audio, and keeps the original video when
+the output fails the same savings guard used for image bundles.
+
+Prepare a Ren'Py project directory for Android packaging:
+
+```bash
+python3 scripts/prepare_android_game.py /path/to/project \
+  --archive output.rpa \
+  --archive-name archive_0.09.05.rpa \
+  --android-assets-dir /mnt/data/renpak-android-assets \
+  --prune-android-assets \
+  --verify-archive \
+  --expect-stripped
+```
+
+Use `--prune-android-assets` when replacing loose Android assets from a smaller or different VP9 run. It moves stale `game/renpak` files into `.renpak_prepare_backups/` before copying the new assets, so APKs do not silently retain old bundles.
+
+Check the local Android/RAPT toolchain:
+
+```bash
+ANDROID_HOME=/opt/android-sdk renpak doctor android \
+  --renpy-sdk /path/to/renpy-sdk-8.4.1
+```
+
+Build, install, and launch the Android package through RAPT:
+
+```bash
+python3 scripts/build_android_package.py /path/to/project \
+  --renpy-sdk /path/to/renpy-sdk-8.4.1 \
+  --android-home /opt/android-sdk \
+  --java-home /path/to/jdk-21 \
+  --output-apk /mnt/data/renpak-output.apk
+```
+
+The build script installs the Android runtime bridge into RAPT, copies the
+project into a clean build directory, ignores `*.bak.*` and
+`.renpak_prepare_backups`, and then calls RAPT. Use `--no-install --no-launch`
+to build an APK without touching a connected device.
+
+For a reproducible MVP smoke test that builds VP9 assets, prepares/prunes a
+Ren'Py project, builds an APK, verifies the packaged assets, and optionally
+checks a connected device for MediaCodec VP9 decode:
+
+```bash
+python3 scripts/android_vp9_smoke.py \
+  --source-rpa /path/to/archive_0.09.05.rpa \
+  --project /path/to/renpy-project \
+  --renpy-sdk /path/to/renpy-sdk-8.4.1 \
+  --output-dir /mnt/data/renpak-android-smoke \
+  --android-home /opt/android-sdk \
+  --java-home /path/to/jdk-21
+```
+
+The lower-level runtime bridge installer is also available:
+
+```bash
+python3 scripts/install_android_runtime.py /path/to/renpy-sdk-8.4.1/rapt
+```
+
+Current MVP validation on the Eternum 0.9.5 reference archive:
+
+| Run | Manifest assets | WebM bundles | Result |
+|-----|-----------------|--------------|--------|
+| `--limit 128 --bundle-size 8` | 128 | 16 | APK asset verification passed; connected Android device decoded VP9 frames through `c2.qti.vp9.decoder`. |
+| `--limit 512 --bundle-size 8` | 512 | 64 | APK asset verification passed; connected Android device decoded VP9 frames through `c2.qti.vp9.decoder`. |
+| Full archive, `--bundle-size 8` | 12225 | 1585 | Archive verification passed with stripped originals; 12.09 GB source RPA became a 7.32 GB output RPA. |
+
+The full-corpus run wrote 1585 Android WebM bundles totaling about 626 MB. The
+`limit512` smoke packaged 64 VP9 bundles into the APK and verified
+`RenpakRuntime decoded frame=...` log lines on device.
+
+Android runtime cache behavior is bounded for MVP use:
+
+- Bundle files extracted by the Python runtime are stored under `renpak_cache`
+  and pruned as an LRU-like disk cache with a 256 MB / 4096 file ceiling.
+- Decoded PNG frames written by the Java `MediaCodec` bridge are stored under
+  the app cache directory and pruned with a 256 MB / 4096 file ceiling.
+- `renpak doctor android` checks ffmpeg, JDK, Android SDK, adb device state,
+  device VP9 codec availability, Ren'Py SDK, and RAPT.
+
 ## How it works
 
 **Build phase.** Reads the RPA-3.0 index, decodes each image to RGBA, encodes to AVIF via libaom (YUV444, full range, BT.709 color). Writes a new RPA with renamed entries and a JSON manifest. Encoding is parallelized with Rayon; already-encoded frames are cached to disk so re-runs skip them.

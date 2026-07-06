@@ -4,5 +4,11 @@ target/
 Cargo.lock
 output/
 *.pyc
+*.bak.*
+*.rpa
+*.apk
+*.aab
+*.jks
+*.keystore
 .vercel
 dev-docs/

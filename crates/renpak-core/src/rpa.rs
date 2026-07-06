@@ -29,7 +29,10 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
         while pos < buf.len() {
             let n = file.seek_read(&mut buf[pos..], offset + pos as u64)?;
             if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected eof"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected eof",
+                ));
             }
             pos += n;
         }
@@ -65,9 +68,12 @@ impl RpaReader {
         let header_bytes = &buf[..n];
 
         // Find the first newline — everything before it is the header line.
-        let newline_pos = header_bytes.iter().position(|&b| b == b'\n').ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "no newline in RPA header")
-        })?;
+        let newline_pos = header_bytes
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "no newline in RPA header")
+            })?;
         let header_str = std::str::from_utf8(&header_bytes[..newline_pos])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -86,19 +92,21 @@ impl RpaReader {
             ));
         }
 
-        let index_offset = u64::from_str_radix(parts[1], 16).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("bad offset: {e}"))
-        })?;
+        let index_offset = u64::from_str_radix(parts[1], 16)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad offset: {e}")))?;
         // XOR all key fields together (rpatool compatibility: vals[2:])
         let mut key = 0u64;
         for part in &parts[2..] {
-            let k = u64::from_str_radix(part, 16).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("bad key: {e}"))
-            })?;
+            let k = u64::from_str_radix(part, 16)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad key: {e}")))?;
             key ^= k;
         }
 
-        Ok(Self { file, key, index_offset })
+        Ok(Self {
+            file,
+            key,
+            index_offset,
+        })
     }
 
     /// Parse the RPA index. Returns a map of filename → RpaEntry.
@@ -112,9 +120,8 @@ impl RpaReader {
 
         // Parse pickle: dict[str, list[tuple[int, int] | tuple[int, int, bytes]]]
         let raw: HashMap<String, Vec<Vec<serde_pickle::Value>>> =
-            serde_pickle::from_slice(&decompressed, DeOptions::default()).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("pickle: {e}"))
-            })?;
+            serde_pickle::from_slice(&decompressed, DeOptions::default())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("pickle: {e}")))?;
 
         let mut entries = HashMap::with_capacity(raw.len());
         for (name, tuples) in raw {
@@ -123,11 +130,7 @@ impl RpaReader {
             }
             let t = &tuples[0];
             let (offset_raw, length_raw, prefix) = match t.len() {
-                2 => (
-                    pickle_to_u64(&t[0])?,
-                    pickle_to_u64(&t[1])?,
-                    Vec::new(),
-                ),
+                2 => (pickle_to_u64(&t[0])?, pickle_to_u64(&t[1])?, Vec::new()),
                 3 => (
                     pickle_to_u64(&t[0])?,
                     pickle_to_u64(&t[1])?,
@@ -139,7 +142,12 @@ impl RpaReader {
             let length = length_raw ^ self.key;
             entries.insert(
                 name.clone(),
-                RpaEntry { name, offset, length, prefix },
+                RpaEntry {
+                    name,
+                    offset,
+                    length,
+                    prefix,
+                },
             );
         }
         Ok(entries)
@@ -225,7 +233,8 @@ impl RpaWriter {
     pub fn add_file(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
         let offset = self.file.stream_position()?;
         self.file.write_all(data)?;
-        self.entries.push((name.to_string(), offset, data.len() as u64));
+        self.entries
+            .push((name.to_string(), offset, data.len() as u64));
         Ok(())
     }
 
@@ -269,13 +278,16 @@ impl RpaWriter {
         for (name, offset, length) in &self.entries {
             index.insert(
                 name.clone(),
-                vec![((offset ^ self.key) as i64, (length ^ self.key) as i64, vec![])],
+                vec![(
+                    (offset ^ self.key) as i64,
+                    (length ^ self.key) as i64,
+                    vec![],
+                )],
             );
         }
 
-        let pickled =
-            serde_pickle::to_vec(&index, serde_pickle::SerOptions::new().proto_v2())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("pickle: {e}")))?;
+        let pickled = serde_pickle::to_vec(&index, serde_pickle::SerOptions::new().proto_v2())
+            .map_err(|e| io::Error::other(format!("pickle: {e}")))?;
 
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&pickled)?;
